@@ -87,14 +87,33 @@ function granExpr(col, gran) {
 // ============================================================
 const STATE = {
   view: 'overview',
-  range: '12m',        // default = last 12 months (MoM view)
-  customStart: '',     // if user picks custom dates, presets are ignored
+  range: '12m',
+  customStart: '',
   customEnd: '',
-  gran: 'month',       // overview time chart granularity
-  taskGran: 'month',   // task-card chart granularity
+  gran: 'month',
+  taskGran: 'month',
   q: '',
-  selectedTask: '',    // for reviewer view
+  team: '',
+  reviewer: '',
+  code: '',
+  selectedTask: '',
+  revTopN: 20,
+  revShowAll: false,
+  filtersLoaded: false,
 };
+
+// Format 'YYYY-MM' → 'Mar 2026'
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function monthLabel(ym) {
+  if (!ym || !/^\d{4}-\d{2}/.test(ym)) return ym || '';
+  const [y, m] = ym.split('-').map(Number);
+  return MONTHS[m-1] + ' ' + y;
+}
+// Format bucket by current granularity — YYYY-MM → 'Mar 2026', dates → dates
+function fmtBucket(bucket, gran) {
+  if (gran === 'month' && /^\d{4}-\d{2}$/.test(bucket)) return monthLabel(bucket);
+  return bucket;
+}
 
 // ============================================================
 // Chart cache — destroy before re-creating
@@ -159,9 +178,15 @@ function renderTable(tblId, cols, rows) {
   const body = '<tbody>' + rows.map(r =>
     '<tr>' + cols.map(c => {
       let v = r[c.key];
-      if (c.num && typeof v === 'number') v = fmt(v);
-      if (c.render) v = c.render(r);
-      return `<td class="${c.num?'num':''}">${c.raw ? v : esc(v == null ? '' : v)}</td>`;
+      if (c.render) {
+        v = c.render(r);
+      } else if (c.num && typeof v === 'number') {
+        v = fmt(v);
+      }
+      const cell = c.raw
+        ? (v == null ? '—' : v)
+        : (v == null || v === '' ? (c.num ? '—' : '') : esc(v));
+      return `<td class="${c.num?'num':''}">${cell}</td>`;
     }).join('') + '</tr>'
   ).join('') + '</tbody>';
   tbl.innerHTML = head + body;
@@ -180,12 +205,47 @@ function setView(name) {
   refresh();
 }
 
+// Populate Team / Reviewer / Code dropdowns once (from DISTINCT queries)
+async function loadFilters() {
+  if (STATE.filtersLoaded) return;
+  const [teams, revs, codes] = await Promise.all([
+    query(`SELECT DISTINCT team FROM assignments WHERE team IS NOT NULL AND team <> '' ORDER BY team`),
+    query(`SELECT DISTINCT reviewer_name FROM assignments WHERE reviewer_name IS NOT NULL AND reviewer_name <> '' ORDER BY reviewer_name`),
+    query(`SELECT DISTINCT code FROM assignments WHERE code IS NOT NULL AND code <> '' ORDER BY code`),
+  ]);
+  fillSel('fTeam',     'All teams',     teams.rows.map(r => r.team));
+  fillSel('fReviewer', 'All reviewers', revs.rows.map(r => r.reviewer_name));
+  fillSel('fCode',     'All codes',     codes.rows.map(r => r.code));
+  STATE.filtersLoaded = true;
+}
+function fillSel(id, allLabel, options) {
+  const sel = document.getElementById(id);
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">${esc(allLabel)}</option>` +
+    options.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  sel.value = cur;
+}
+
+// Build the shared WHERE clause + args starting at position 4
+// (positions 1-3 already used: start, end, q-like)
+function extraFilterSQL(prefix) {
+  // prefix = 'a.' for JOINed queries, '' for direct
+  const parts = [];
+  const args  = [];
+  let n = 4;
+  if (STATE.team)     { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
+  if (STATE.reviewer) { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
+  if (STATE.code)     { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
+  return { sql: parts.length ? ' AND ' + parts.join(' AND ') : '', args };
+}
+
 async function refresh() {
   const R = currentRange();
   const label = rangeLabel(STATE.range, R.start, R.end);
   document.getElementById('pageSub').textContent = 'Loading ' + label + '…';
   const t0 = performance.now();
   try {
+    await loadFilters();
     if (STATE.view === 'overview')  await loadOverview(R);
     if (STATE.view === 'tasks')     await loadTasks(R);
     if (STATE.view === 'reviewers') await loadReviewers(R);
@@ -202,8 +262,9 @@ async function refresh() {
 async function loadOverview(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
+  const ef = extraFilterSQL('');
+  const efA = extraFilterSQL('a.');
 
-  // Global KPI counts — assignments-only (no JOIN inflation)
   const kpi = (await query(`
     SELECT
       COUNT(*)                              AS assignments,
@@ -213,10 +274,9 @@ async function loadOverview(R) {
     FROM assignments
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
-  `, [start, end, like])).rows[0] || {};
+      ${ef.sql}
+  `, [start, end, like, ...ef.args])).rows[0] || {};
 
-  // Overall avg review time = avg across all data_logs matching assignments
-  // in range. One row per (matchid, code) log — no over-count.
   const overall = (await query(`
     SELECT AVG(dl.actual_time_taken) AS avg_actual, COUNT(dl.matchid) AS log_rows
     FROM data_logs dl
@@ -225,10 +285,10 @@ async function loadOverview(R) {
       WHERE a.match_id = dl.matchid AND a.code = dl.code
         AND a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
+        ${efA.sql}
     )
-  `, [start, end, like])).rows[0] || {};
+  `, [start, end, like, ...efA.args])).rows[0] || {};
 
-  // Fastest / slowest task by avg (need >= 5 samples to avoid outliers)
   const perTask = (await query(`
     SELECT task, avg_actual, samples FROM (
       SELECT a.task AS task,
@@ -239,11 +299,12 @@ async function loadOverview(R) {
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
         AND a.task IS NOT NULL AND a.task <> ''
+        ${efA.sql}
       GROUP BY a.task
       HAVING samples >= 5
     )
     ORDER BY avg_actual ASC
-  `, [start, end, like])).rows;
+  `, [start, end, like, ...efA.args])).rows;
   const fastest = perTask[0];
   const slowest = perTask[perTask.length - 1];
 
@@ -272,9 +333,9 @@ async function loadOverview(R) {
 async function loadTasks(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
+  const ef  = extraFilterSQL('');
+  const efA = extraFilterSQL('a.');
 
-  // Query 1 — pure assignment counts + top month per task, one row per task.
-  // Uses window function to rank months by count within each task.
   const summary = (await query(`
     WITH filtered AS (
       SELECT match_id, code, task, substr(assignment_date, 1, 7) AS ym
@@ -282,6 +343,7 @@ async function loadTasks(R) {
       WHERE assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
         AND task IS NOT NULL AND task <> ''
+        ${ef.sql}
     ),
     counts AS (
       SELECT task, COUNT(*) AS assignments, COUNT(DISTINCT match_id) AS distinct_matches
@@ -296,11 +358,8 @@ async function loadTasks(R) {
     SELECT c.task, c.assignments, c.distinct_matches, t.ym AS top_month
     FROM counts c LEFT JOIN top_month t ON t.task = c.task
     ORDER BY c.assignments DESC
-  `, [start, end, like])).rows;
+  `, [start, end, like, ...ef.args])).rows;
 
-  // Query 2 — avg review time per task from data_logs, WITHOUT joining
-  // multiplies. One row per (matchid, code) log; average grouped by task
-  // via subquery lookup.
   const avgRows = (await query(`
     SELECT a.task AS task, AVG(dl.actual_time_taken) AS avg_actual
     FROM assignments a
@@ -308,8 +367,9 @@ async function loadTasks(R) {
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND a.task IS NOT NULL AND a.task <> ''
+      ${efA.sql}
     GROUP BY a.task
-  `, [start, end, like])).rows;
+  `, [start, end, like, ...efA.args])).rows;
   const avgByTask = {};
   avgRows.forEach(r => { avgByTask[r.task] = r.avg_actual; });
 
@@ -347,7 +407,7 @@ async function loadTasks(R) {
         </div>
         <div class="task-card-stat">
           <div class="task-card-stat-label">Top month</div>
-          <div class="task-card-stat-value">${esc(t.top_month || '—')}</div>
+          <div class="task-card-stat-value">${esc(monthLabel(t.top_month) || '—')}</div>
         </div>
       </div>
       <div class="task-card-detail">
@@ -356,7 +416,6 @@ async function loadTasks(R) {
     </div>
   `).join('');
 
-  // Per-task trend (single query, split by task)
   const gexpr = granExpr('a.assignment_date', STATE.taskGran);
   const trend = (await query(`
     SELECT a.task AS task, ${gexpr} AS bucket, COUNT(*) AS n
@@ -364,9 +423,10 @@ async function loadTasks(R) {
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND a.task IS NOT NULL AND a.task <> ''
+      ${efA.sql}
     GROUP BY a.task, bucket
     ORDER BY a.task, bucket
-  `, [start, end, like])).rows;
+  `, [start, end, like, ...efA.args])).rows;
 
   const bucketsSet = new Set();
   trend.forEach(r => bucketsSet.add(r.bucket));
@@ -376,10 +436,11 @@ async function loadTasks(R) {
     if (!byTaskData[r.task]) byTaskData[r.task] = {};
     byTaskData[r.task][r.bucket] = r.n;
   });
+  const labels = buckets.map(b => fmtBucket(b, STATE.taskGran));
   summary.forEach(t => {
     const safe = t.task.replace(/\W/g, '_');
     const dataArr = buckets.map(b => byTaskData[t.task]?.[b] || 0);
-    line('fullTaskChart_' + safe, buckets, [{ label: t.task, data: dataArr, color: css('--accent') }], { fill: true });
+    line('fullTaskChart_' + safe, labels, [{ label: t.task, data: dataArr, color: css('--accent') }], { fill: true });
   });
 
   // Expand button wiring
@@ -396,52 +457,63 @@ async function loadTasks(R) {
   });
 }
 
-// --- Reviewers view — scoped to a single task ---
+// --- Reviewers view — REQUIRES a task pick (no "all tasks" option) ---
 async function loadReviewers(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
+  const efA = extraFilterSQL('a.');
 
-  // Populate task dropdown if empty
   const sel = document.getElementById('revTaskSel');
-  if (sel.options.length <= 1) {
+
+  // Populate task dropdown from DB — first task auto-picked
+  if (sel.options.length <= 1 || sel.options[0].value === '') {
     const tasks = (await query(`
       SELECT DISTINCT task FROM assignments
       WHERE task IS NOT NULL AND task <> '' ORDER BY task
     `)).rows.map(r => r.task);
-    sel.innerHTML = '<option value="">— All tasks —</option>' +
-      tasks.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
-    if (STATE.selectedTask) sel.value = STATE.selectedTask;
+    sel.innerHTML = tasks.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+    // Restore previous choice, or first task
+    if (STATE.selectedTask && tasks.indexOf(STATE.selectedTask) >= 0) sel.value = STATE.selectedTask;
+    else if (tasks.length) sel.value = tasks[0];
+    STATE.selectedTask = sel.value;
   }
   const task = sel.value;
   STATE.selectedTask = task;
 
-  const taskFilter = task ? 'AND a.task = ?4' : '';
-  const args = task ? [start, end, like, task] : [start, end, like];
+  if (!task) {
+    document.querySelector('#tblReviewer').innerHTML = '<tbody><tr><td class="empty">Pick a task above.</td></tr></tbody>';
+    destroyChart('chartReviewer');
+    return;
+  }
 
-  // Two-step: pure counts from assignments, then avg time from data_logs.
-  // Avoids row-multiplication from the JOIN.
+  const args = [start, end, like, ...efA.args, task];
+  const taskParam = '?' + (4 + efA.args.length);
+
+  // Counts per reviewer (no JOIN inflation)
   const counts = (await query(`
-    SELECT
-      code, reviewer_name, team,
+    SELECT code, reviewer_name, team,
       COUNT(*) AS matches_listed,
       COUNT(DISTINCT match_id) AS distinct_matches
     FROM assignments a
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
-      ${taskFilter}
+      ${efA.sql}
+      AND a.task = ${taskParam}
     GROUP BY code, reviewer_name, team
   `, args)).rows;
 
+  // Avg/min/max time from data_logs
   const stats = (await query(`
     SELECT a.code AS code,
-           AVG(dl.actual_time_taken) AS avg_actual,
-           MIN(dl.actual_time_taken) AS min_actual,
-           MAX(dl.actual_time_taken) AS max_actual
+      AVG(dl.actual_time_taken) AS avg_actual,
+      MIN(dl.actual_time_taken) AS min_actual,
+      MAX(dl.actual_time_taken) AS max_actual
     FROM assignments a
     JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
-      ${taskFilter}
+      ${efA.sql}
+      AND a.task = ${taskParam}
     GROUP BY a.code
   `, args)).rows;
   const statsBy = {};
@@ -453,15 +525,21 @@ async function loadReviewers(R) {
     min_actual: statsBy[c.code]?.min_actual ?? null,
     max_actual: statsBy[c.code]?.max_actual ?? null,
   })).filter(r => r.avg_actual != null)
-     .sort((a, b) => a.avg_actual - b.avg_actual)
-     .slice(0, 300);
+     .sort((a, b) => a.avg_actual - b.avg_actual);
 
-  // Chart: top 20 fastest (lowest avg) with data
-  const withData = revs.filter(r => r.avg_actual != null).slice(0, 20);
+  // Top-N picker: user chooses how many to display in chart (default 20) or "All"
+  const topN = STATE.revShowAll ? revs.length : Math.max(5, Math.min(revs.length, STATE.revTopN || 20));
+  const shown = revs.slice(0, topN);
+
+  // Dynamically resize the chart container to fit N horizontal bars
+  const wrap = document.getElementById('reviewerChartWrap');
+  const heightPx = Math.max(300, shown.length * 22 + 60);
+  wrap.style.height = heightPx + 'px';
+
   bar('chartReviewer',
-    withData.map(r => (r.reviewer_name || '?') + ' (' + r.code + ')'),
-    withData.map(r => round1(r.avg_actual)),
-    'Avg actual (min)',
+    shown.map(r => (r.reviewer_name || '?') + ' (' + r.code + ')'),
+    shown.map(r => round1(r.avg_actual)),
+    'Avg actual (min) — ' + task,
     { horizontal: true },
   );
 
@@ -477,23 +555,158 @@ async function loadReviewers(R) {
   ], revs);
 }
 
-// --- Rows — minimal columns (no review time, diff, notes) ---
+// --- Rows — assignments w/ Apps Script rules applied ---
+// Half/Side scaling for expected time:
+//   scale = (side ∈ {Home,Away} ? 2 : 1) * (half ∈ {1st,2nd} ? 2 : 1)
+//   expected = base_task_minutes / scale
+// Actual time from data_logs:
+//   half=1st       → partid 1
+//   half=2nd       → partid 2
+//   half=Both,side=Both → partid 1+2 only
+//   half=Both,side=Home/Away → all partids present (incl. 3rd/4th/5th)
+// 24-hour rule per (matchid, code, partid):
+//   sort logs asc by review_started; anchor = first; keep rows where
+//   start ≤ anchor + 24h; log excluded ones as "additional logs after N days".
 async function loadRows(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
-  const { rows } = await query(`
+  const ef = extraFilterSQL('');
+
+  // Assignments in range
+  const arows = (await query(`
     SELECT match_id, assignment_date, competition, home_team, away_team,
            code, reviewer_name, team, task, half, side
     FROM assignments
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
+      ${ef.sql}
     ORDER BY assignment_date DESC, match_id DESC
     LIMIT 500
-  `, [start, end, like]);
-  document.getElementById('rowsCount').textContent = rows.length + ' rows (max 500)';
+  `, [start, end, like, ...ef.args])).rows;
+
+  if (!arows.length) {
+    document.getElementById('rowsCount').textContent = '0 rows';
+    renderTable('tblRows', [{ key:'x', label:'—' }], []);
+    return;
+  }
+
+  // Distinct (match_id, code) pairs → fetch logs + expected minutes together
+  const uniqPairs = new Set(arows.map(r => r.match_id + '||' + r.code));
+  const uniqTasks = new Set(arows.map(r => r.task).filter(Boolean));
+
+  // Pull matching data_logs for all pairs. Chunk into groups so IN() doesn't
+  // exceed SQL parameter limits (~999 args).
+  const pairKeys = Array.from(uniqPairs);
+  const logsByPair = {}; // 'match||code' → { partid: [ {start_ts, actual, brk, tot} ] }
+  const CHUNK = 200;
+  for (let i = 0; i < pairKeys.length; i += CHUNK) {
+    const chunk = pairKeys.slice(i, i + CHUNK);
+    const matchIds = chunk.map(k => k.split('||')[0]);
+    const codes    = chunk.map(k => k.split('||')[1]);
+    const placeholders = chunk.map((_, j) => `(?${j*2+1}, ?${j*2+2})`).join(',');
+    const args = [];
+    chunk.forEach(k => { const [m, c] = k.split('||'); args.push(m, c); });
+    const { rows } = await query(`
+      SELECT matchid, code, partid, review_started, actual_time_taken, total_break_time, total_time_taken
+      FROM data_logs
+      WHERE (matchid, code) IN (VALUES ${placeholders})
+    `, args);
+    rows.forEach(r => {
+      const key = r.matchid + '||' + r.code;
+      if (!logsByPair[key]) logsByPair[key] = {};
+      const p = String(r.partid);
+      if (!logsByPair[key][p]) logsByPair[key][p] = [];
+      const ts = r.review_started ? new Date(r.review_started).getTime() : 0;
+      logsByPair[key][p].push({
+        ts,
+        actual: parseFloat(r.actual_time_taken) || 0,
+        brk:    parseFloat(r.total_break_time)  || 0,
+        tot:    parseFloat(r.total_time_taken)  || 0,
+      });
+    });
+  }
+  // Sort each partid group asc by start ts
+  Object.values(logsByPair).forEach(perPart => {
+    Object.values(perPart).forEach(arr => arr.sort((a, b) => a.ts - b.ts));
+  });
+
+  // Expected minutes per task
+  const expByTask = {};
+  const taskList = Array.from(uniqTasks);
+  if (taskList.length) {
+    const placeholders = taskList.map((_, i) => '?' + (i+1)).join(',');
+    const { rows } = await query(
+      `SELECT task, expected_minutes FROM productivity_config WHERE task IN (${placeholders})`,
+      taskList,
+    );
+    rows.forEach(r => { expByTask[r.task] = parseFloat(r.expected_minutes) || 0; });
+  }
+
+  // Compute actual / expected / diff / notes for each assignment
+  const enriched = arows.map(a => {
+    const key = a.match_id + '||' + a.code;
+    const partMap = logsByPair[key] || {};
+    const availablePartids = Object.keys(partMap);
+    const halfL = (a.half || '').toLowerCase();
+    const sideL = (a.side || '').toLowerCase();
+
+    // Which partids to sum?
+    let targetPartids;
+    if (halfL === '1st') targetPartids = ['1'];
+    else if (halfL === '2nd') targetPartids = ['2'];
+    else if (sideL === 'home' || sideL === 'away') {
+      // all halves worked incl. extras
+      targetPartids = availablePartids.length ? availablePartids : ['1', '2'];
+    } else {
+      // Both/Both → 1st + 2nd only
+      targetPartids = ['1', '2'];
+    }
+
+    // Apply 24hr rule per partid
+    const WINDOW = 24 * 60 * 60 * 1000;
+    let actual = 0, brk = 0, tot = 0;
+    const lateDays = new Set();
+    targetPartids.forEach(pid => {
+      const rows = partMap[pid];
+      if (!rows || !rows.length) return;
+      const anchor = rows[0].ts;
+      rows.forEach(r => {
+        if (anchor && r.ts && (r.ts - anchor) > WINDOW) {
+          lateDays.add(Math.round((r.ts - anchor) / (24*60*60*1000)));
+          return;
+        }
+        actual += r.actual;
+        brk += r.brk;
+        tot += r.tot;
+      });
+    });
+
+    // Scale expected by side/half narrowing
+    const sideNarrow = (sideL === 'home' || sideL === 'away');
+    const halfNarrow = (halfL === '1st' || halfL === '2nd');
+    const scale = (sideNarrow ? 2 : 1) * (halfNarrow ? 2 : 1); // 1, 2, or 4
+    const base = expByTask[a.task];
+    const expected = (base != null) ? base / scale : null;
+    const diff = (expected != null) ? (actual - expected) : null;
+    const notes = lateDays.size
+      ? 'Additional logs after (' + Array.from(lateDays).sort((x,y)=>x-y).map(d => d + ' day' + (d===1?'':'s')).join(', ') + ')'
+      : '';
+
+    return {
+      ...a,
+      assignment_date: (a.assignment_date || '').slice(0, 10),
+      actual: actual > 0 ? actual : (Object.keys(partMap).length ? actual : null),
+      expected,
+      diff,
+      scale,
+      notes,
+    };
+  });
+
+  document.getElementById('rowsCount').textContent = enriched.length + ' rows (max 500)';
   renderTable('tblRows', [
     { key:'match_id',        label:'Match ID' },
-    { key:'assignment_date', label:'Assigned',    render: r => (r.assignment_date || '').slice(0,10), raw:false },
+    { key:'assignment_date', label:'Assigned' },
     { key:'competition',     label:'Competition' },
     { key:'home_team',       label:'Home' },
     { key:'away_team',       label:'Away' },
@@ -503,7 +716,20 @@ async function loadRows(R) {
     { key:'code',            label:'Code' },
     { key:'reviewer_name',   label:'Reviewer' },
     { key:'team',            label:'Team' },
-  ], rows);
+    { key:'actual',          label:'Actual (min)',   num:true },
+    { key:'expected',        label:'Expected (min)', num:true },
+    { key:'scale',           label:'/x',             num:true },
+    {
+      key:'diff', label:'Diff (min)', num:true, raw:true,
+      render: r => {
+        if (r.diff == null) return '—';
+        const v = round1(r.diff);
+        const cls = v > 0 ? 'style="color:var(--pos);font-weight:600"' : (v < 0 ? 'style="color:var(--neg);font-weight:600"' : '');
+        return `<span ${cls}>${v > 0 ? '+' : ''}${v}</span>`;
+      },
+    },
+    { key:'notes', label:'Notes' },
+  ], enriched);
 }
 
 // ============================================================
@@ -545,9 +771,25 @@ document.getElementById('q').addEventListener('input', e => {
   window._t = setTimeout(refresh, 300);
 });
 document.getElementById('reloadBtn').addEventListener('click', refresh);
+
+document.getElementById('fTeam').addEventListener('change', e => { STATE.team = e.target.value; refresh(); });
+document.getElementById('fReviewer').addEventListener('change', e => { STATE.reviewer = e.target.value; refresh(); });
+document.getElementById('fCode').addEventListener('change', e => { STATE.code = e.target.value; refresh(); });
+
 document.getElementById('revTaskSel').addEventListener('change', e => {
   STATE.selectedTask = e.target.value;
-  if (STATE.view === 'reviewers') loadReviewers().catch(err => console.error(err));
+  if (STATE.view === 'reviewers') refresh();
+});
+const revTopN = document.getElementById('revTopN');
+if (revTopN) revTopN.addEventListener('input', e => {
+  STATE.revTopN = parseInt(e.target.value || '20', 10);
+  if (STATE.view === 'reviewers') refresh();
+});
+const revShowAll = document.getElementById('revShowAll');
+if (revShowAll) revShowAll.addEventListener('change', e => {
+  STATE.revShowAll = e.target.checked;
+  document.getElementById('revTopN').disabled = e.target.checked;
+  if (STATE.view === 'reviewers') refresh();
 });
 
 // Theme toggle — persists to localStorage
