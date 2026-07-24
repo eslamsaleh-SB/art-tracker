@@ -1,5 +1,0 @@
-worker.js
-wrangler.jsonc
-functions/
-.gitignore
-.assetsignore
