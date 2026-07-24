@@ -1,5 +1,9 @@
 {
   "name": "art-tracker",
+  "main": "worker.js",
   "compatibility_date": "2025-01-01",
-  "pages_build_output_dir": "./"
+  "assets": {
+    "directory": "./",
+    "binding": "ASSETS"
+  }
 }
