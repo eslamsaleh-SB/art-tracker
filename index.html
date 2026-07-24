@@ -1,90 +1,359 @@
 <!doctype html>
-<html>
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <title>ART Tracker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-  :root { --bg:#f7f8fa; --card:#fff; --border:#e5e7eb; --text:#1f2937; --muted:#6b7280; --accent:#2563eb; --pos:#b91c1c; --neg:#047857; }
+  :root[data-theme="dark"] {
+    --bg: #0b0f19;
+    --bg-elev: #111827;
+    --card: #1a2332;
+    --card-hover: #1f2a3d;
+    --border: #253044;
+    --text: #e5e7eb;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --pos: #ef4444;
+    --neg: #10b981;
+    --warn: #f59e0b;
+    --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 4px 12px rgba(0,0,0,0.2);
+  }
+  :root[data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-elev: #ffffff;
+    --card: #ffffff;
+    --card-hover: #f1f5f9;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --text-muted: #475569;
+    --text-dim: #94a3b8;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --pos: #dc2626;
+    --neg: #059669;
+    --warn: #d97706;
+    --shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);
+  }
   * { box-sizing: border-box; }
-  body { margin:0; padding:16px; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); font-size:13px; }
-  h1 { margin:0 0 4px; font-size:20px; }
-  .sub { color:var(--muted); font-size:12px; margin-bottom:12px; }
-  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--card); padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:12px; }
-  .toolbar input, .toolbar select, .toolbar button { padding:6px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:#fff; }
-  .toolbar button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
-  .toolbar button.secondary { background:#fff; color:var(--accent); }
-  .toolbar .chip { background:#eef2ff; color:var(--accent); padding:4px 10px; border-radius:20px; font-weight:600; }
-  .tabs { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
-  .tab { padding:6px 14px; background:#fff; border:0; cursor:pointer; font-size:13px; color:var(--text); }
-  .tab.active { background:var(--accent); color:#fff; }
-  .tab + .tab { border-left:1px solid var(--border); }
-  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:12px; box-shadow:0 1px 2px rgba(16,24,40,0.04); }
-  .panel h3 { margin:0 0 10px; font-size:14px; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  @media (max-width:900px) { .grid { grid-template-columns:1fr; } }
-  .chart-wrap { position:relative; height:300px; }
-  table { width:100%; border-collapse:collapse; font-size:12px; }
-  th, td { padding:6px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
-  th { background:#fafbfc; text-align:left; position:sticky; top:0; }
-  th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .table-wrap { max-height:380px; overflow:auto; border:1px solid var(--border); border-radius:8px; background:var(--card); }
-  .loading, .error { padding:16px; text-align:center; color:var(--muted); }
-  .error { color:#b91c1c; }
+  html, body { margin:0; padding:0; height:100%; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg); color: var(--text);
+    font-size: 13px; font-feature-settings: 'cv02','cv03','cv04';
+    display: flex; min-height: 100vh;
+  }
+  /* --- Sidebar --- */
+  .sidebar {
+    width: 220px; background: var(--bg-elev); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; padding: 20px 12px;
+    position: sticky; top: 0; height: 100vh; flex-shrink: 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 14px;
+  }
+  .brand-name { font-weight: 700; font-size: 15px; letter-spacing: -0.02em; }
+  .brand-sub { font-size: 11px; color: var(--text-dim); }
+  .nav { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px; cursor: pointer;
+    color: var(--text-muted); background: transparent; border: 0;
+    font-size: 13px; text-align: left; font-family: inherit;
+  }
+  .nav-item:hover { background: var(--card-hover); color: var(--text); }
+  .nav-item.active { background: var(--accent); color: #fff; }
+  .nav-item .ico { font-size: 15px; width: 18px; text-align: center; }
+  .nav-footer { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+  .footer-btn {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-radius: 8px; cursor: pointer;
+    color: var(--text-muted); background: transparent; border: 0;
+    font-size: 12px; text-align: left; font-family: inherit;
+  }
+  .footer-btn:hover { background: var(--card-hover); color: var(--text); }
+
+  /* --- Main --- */
+  .main { flex: 1; min-width: 0; padding: 20px 28px; overflow-x: hidden; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .page-title { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+  .page-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .input, .select, .btn {
+    padding: 8px 12px; font-size: 13px; font-family: inherit;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card); color: var(--text);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .input:focus, .select:focus { outline: none; border-color: var(--accent); }
+  .btn { cursor: pointer; }
+  .btn:hover { background: var(--card-hover); }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .search { position: relative; }
+  .search .input { padding-left: 32px; min-width: 240px; }
+  .search::before {
+    content: '⌕'; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    color: var(--text-dim); font-size: 15px;
+  }
+
+  /* --- Segmented control (granularity) --- */
+  .segment {
+    display: inline-flex; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 2px; gap: 2px;
+  }
+  .segment button {
+    padding: 6px 12px; border: 0; background: transparent; color: var(--text-muted);
+    font-size: 12px; font-weight: 500; border-radius: 6px; cursor: pointer;
+    font-family: inherit;
+  }
+  .segment button:hover { color: var(--text); }
+  .segment button.active { background: var(--accent); color: #fff; }
+
+  /* --- KPI cards --- */
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+  }
+  .kpi {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; box-shadow: var(--shadow);
+  }
+  .kpi-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .kpi-value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; }
+  .kpi-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  /* --- Panels --- */
+  .panel {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; box-shadow: var(--shadow); margin-bottom: 16px;
+  }
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; flex-wrap: wrap; gap: 10px;
+  }
+  .panel-title { font-size: 14px; font-weight: 600; margin: 0; }
+  .panel-sub { font-size: 12px; color: var(--text-muted); }
+  .chart-wrap { position: relative; height: 300px; }
+  .chart-wrap.tall { height: 380px; }
+  .chart-wrap.short { height: 200px; }
+
+  /* --- Task cards (grid of drill-down cards) --- */
+  .task-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+  }
+  .task-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; box-shadow: var(--shadow); transition: transform 0.15s, border-color 0.15s;
+    cursor: pointer;
+  }
+  .task-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .task-card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .task-card-name { font-weight: 600; font-size: 14px; }
+  .task-card-stats { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
+  .task-card-stat { }
+  .task-card-stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .task-card-stat-value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .task-card-chart { height: 120px; position: relative; margin-top: 8px; }
+  .task-card-expand {
+    width: 24px; height: 24px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; font-size: 14px;
+    font-family: inherit;
+  }
+  .task-card-expand:hover { background: var(--card-hover); color: var(--text); }
+  .task-card-detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .task-card.expanded .task-card-detail { display: block; }
+  .task-card.expanded .task-card-expand { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* --- Tables --- */
+  .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--card); max-height: 460px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th { background: var(--bg-elev); color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; position: sticky; top: 0; z-index: 1; }
+  tbody tr { transition: background 0.1s; }
+  tbody tr:hover { background: var(--card-hover); }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.pos { color: var(--pos); font-weight: 600; }
+  td.neg { color: var(--neg); font-weight: 600; }
+  td.badge { }
+  .chip {
+    display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px;
+    font-weight: 500; background: var(--bg-elev); color: var(--text-muted);
+  }
+  .chip-accent { background: rgba(59,130,246,0.15); color: var(--accent); }
+
+  .loading { padding: 24px; text-align: center; color: var(--text-muted); }
+  .empty { padding: 40px; text-align: center; color: var(--text-dim); }
+  .error { padding: 16px; background: rgba(239,68,68,0.1); color: var(--pos); border-radius: 8px; }
+
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .col { flex: 1 1 380px; min-width: 0; }
+  .hidden { display: none !important; }
+  select.select { padding-right: 30px; -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%2394a3b8' d='M0 0l5 6 5-6z'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center; }
+
+  /* Toolbar layout on narrow screens */
+  @media (max-width: 720px) {
+    .sidebar { width: 60px; padding: 12px 6px; }
+    .brand-name, .brand-sub, .nav-item span:not(.ico), .footer-btn span:not(.ico) { display: none; }
+    .main { padding: 16px; }
+  }
 </style>
 </head>
 <body>
-<h1>ART Tracker</h1>
-<div class="sub" id="meta">Loading…</div>
 
-<div class="toolbar">
-  <div class="tabs">
-    <button class="tab active" data-tab="rows">Rows</button>
-    <button class="tab" data-tab="task">By Task</button>
-    <button class="tab" data-tab="reviewer">By Reviewer</button>
-  </div>
-  <input id="q" type="search" placeholder="Search reviewer, task, match…" />
-  <select id="fRange">
-    <option value="week">This week</option>
-    <option value="month" selected>This month</option>
-    <option value="quarter">This quarter</option>
-    <option value="all">All time</option>
-  </select>
-  <button id="reload" class="secondary">Reload</button>
-  <span class="chip" id="count">0 rows</span>
-</div>
-
-<div id="tab-rows">
-  <div class="table-wrap"><table id="tblRows"></table></div>
-</div>
-
-<div id="tab-task" hidden>
-  <div class="grid">
-    <div class="panel">
-      <h3>Assignments per task</h3>
-      <div class="chart-wrap"><canvas id="chartTaskCount"></canvas></div>
-    </div>
-    <div class="panel">
-      <h3>Avg actual time per task (min)</h3>
-      <div class="chart-wrap"><canvas id="chartTaskAvg"></canvas></div>
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-mark">A</div>
+    <div>
+      <div class="brand-name">ART Tracker</div>
+      <div class="brand-sub">Reviewer analytics</div>
     </div>
   </div>
-  <div class="panel">
-    <h3>Task breakdown</h3>
-    <div class="table-wrap"><table id="tblTask"></table></div>
+  <nav class="nav">
+    <button class="nav-item active" data-view="overview"><span class="ico">◫</span><span>Overview</span></button>
+    <button class="nav-item" data-view="tasks"><span class="ico">▤</span><span>By Task</span></button>
+    <button class="nav-item" data-view="reviewers"><span class="ico">◉</span><span>By Reviewer</span></button>
+    <button class="nav-item" data-view="rows"><span class="ico">≡</span><span>Assignments</span></button>
+  </nav>
+  <div class="nav-footer">
+    <button class="footer-btn" id="themeToggle"><span class="ico">◐</span><span>Toggle theme</span></button>
+    <button class="footer-btn" id="reloadBtn"><span class="ico">↻</span><span>Reload</span></button>
   </div>
-</div>
+</aside>
 
-<div id="tab-reviewer" hidden>
-  <div class="panel">
-    <h3>Top 20 reviewers by assignments</h3>
-    <div class="chart-wrap"><canvas id="chartReviewer"></canvas></div>
+<main class="main">
+  <div class="topbar">
+    <div>
+      <h1 class="page-title" id="pageTitle">Overview</h1>
+      <div class="page-sub" id="pageSub">—</div>
+    </div>
+    <div class="filters">
+      <div class="search"><input class="input" id="q" type="search" placeholder="Search reviewer, task, match…"></div>
+      <div class="segment" id="rangeSeg">
+        <button data-range="week">Week</button>
+        <button data-range="month" class="active">Month</button>
+        <button data-range="quarter">Quarter</button>
+        <button data-range="year">Year</button>
+        <button data-range="all">All</button>
+      </div>
+    </div>
   </div>
-  <div class="panel">
-    <h3>Reviewer breakdown</h3>
-    <div class="table-wrap"><table id="tblReviewer"></table></div>
-  </div>
-</div>
+
+  <!-- OVERVIEW -->
+  <section id="view-overview" class="view">
+    <div class="kpi-grid" id="kpis"></div>
+    <div class="row">
+      <div class="col">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Assignments over time</h3>
+              <div class="panel-sub">Grouped by selected granularity</div>
+            </div>
+            <div class="segment" id="granSeg">
+              <button data-gran="day">Day</button>
+              <button data-gran="week">Week</button>
+              <button data-gran="month" class="active">Month</button>
+              <button data-gran="quarter">Quarter</button>
+              <button data-gran="year">Year</button>
+            </div>
+          </div>
+          <div class="chart-wrap tall"><canvas id="chartOverviewTime"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col">
+        <div class="panel">
+          <div class="panel-header"><h3 class="panel-title">Assignments per task</h3></div>
+          <div class="chart-wrap"><canvas id="chartOverviewTasks"></canvas></div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel">
+          <div class="panel-header"><h3 class="panel-title">Assignments per team</h3></div>
+          <div class="chart-wrap"><canvas id="chartOverviewTeams"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TASKS -->
+  <section id="view-tasks" class="view hidden">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h3 class="panel-title">Task drill-down</h3>
+          <div class="panel-sub">Click <b>+</b> to expand a task and see its trend</div>
+        </div>
+        <div class="segment" id="taskGranSeg">
+          <button data-gran="day">Day</button>
+          <button data-gran="week">Week</button>
+          <button data-gran="month" class="active">Month</button>
+          <button data-gran="quarter">Quarter</button>
+          <button data-gran="year">Year</button>
+        </div>
+      </div>
+    </div>
+    <div class="task-grid" id="taskGrid"></div>
+  </section>
+
+  <!-- REVIEWERS -->
+  <section id="view-reviewers" class="view hidden">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h3 class="panel-title">Reviewer analytics</h3>
+          <div class="panel-sub">Pick a task to see per-reviewer averages for it</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="panel-sub">Task:</span>
+          <select id="revTaskSel" class="select"><option value="">Loading…</option></select>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3 class="panel-title">Top reviewers — avg actual (min)</h3></div>
+      <div class="chart-wrap tall"><canvas id="chartReviewer"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3 class="panel-title">Reviewer breakdown</h3></div>
+      <div class="table-wrap"><table id="tblReviewer"></table></div>
+    </div>
+  </section>
+
+  <!-- ROWS -->
+  <section id="view-rows" class="view hidden">
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Assignments</h3>
+        <span class="chip" id="rowsCount">0</span>
+      </div>
+      <div class="table-wrap"><table id="tblRows"></table></div>
+    </div>
+  </section>
+
+</main>
 
 <script src="/app.js"></script>
 </body>
