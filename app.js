@@ -765,11 +765,15 @@ document.getElementById('taskGranSeg').addEventListener('click', e => {
   if (STATE.view === 'tasks') refresh();
 });
 
-document.getElementById('q').addEventListener('input', e => {
-  STATE.q = e.target.value.trim();
-  clearTimeout(window._t);
-  window._t = setTimeout(refresh, 300);
-});
+// Search input removed in favor of dropdown filters — guard in case it's absent.
+const qEl = document.getElementById('q');
+if (qEl) {
+  qEl.addEventListener('input', e => {
+    STATE.q = e.target.value.trim();
+    clearTimeout(window._t);
+    window._t = setTimeout(refresh, 300);
+  });
+}
 document.getElementById('reloadBtn').addEventListener('click', refresh);
 
 document.getElementById('fTeam').addEventListener('change', e => { STATE.team = e.target.value; refresh(); });
