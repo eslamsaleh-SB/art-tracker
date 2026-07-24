@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ART Tracker</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; white-space: nowrap; }
+  th { background: #f9fafb; position: sticky; top: 0; }
+  .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
+  input, button { padding: 6px 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>ART Tracker</h1>
+<div class="toolbar">
+  <input id="q" placeholder="Search reviewer, task, match…" />
+  <button id="reload">Reload</button>
+  <span id="meta"></span>
+</div>
+<table id="tbl"><thead></thead><tbody></tbody></table>
+<script src="/app.js"></script>
+</body>
+</html>
