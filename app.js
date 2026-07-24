@@ -527,5 +527,150 @@ try {
   if (saved) document.documentElement.setAttribute('data-theme', saved);
 } catch(_) {}
 
+// ============================================================
+// CSV Import
+// ============================================================
+const IMPORT_CONFIG = {
+  assignments: {
+    // DB columns to write; source column looked up case+punct-insensitive
+    dbCols: ['match_id','code','task','half','side','reviewer_name','team','competition',
+             'home_team','away_team','home_priority','away_priority','comp_priority',
+             'match_date','sla','assignment_date','last_modified'],
+    aliases: {},
+  },
+  data_logs: {
+    dbCols: ['matchid','code','partid','full_name','review_started','review_ended',
+             'actual_time_taken','total_break_time','total_time_taken'],
+    aliases: { code: 'hr_code' },
+  },
+  productivity_config: {
+    dbCols: ['task','expected_minutes'],
+    aliases: {},
+  },
+};
+function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+// Robust minimal CSV parser: handles quoted fields, escaped quotes, commas
+// inside quotes, and CRLF/LF line endings. No dependency.
+function parseCSV(text) {
+  const rows = [];
+  let cur = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], n = text[i+1];
+    if (inQ) {
+      if (c === '"' && n === '"') { field += '"'; i++; }
+      else if (c === '"') { inQ = false; }
+      else { field += c; }
+    } else {
+      if (c === '"') { inQ = true; }
+      else if (c === ',') { cur.push(field); field = ''; }
+      else if (c === '\r' && n === '\n') { cur.push(field); rows.push(cur); cur = []; field = ''; i++; }
+      else if (c === '\n' || c === '\r') { cur.push(field); rows.push(cur); cur = []; field = ''; }
+      else { field += c; }
+    }
+  }
+  if (field.length || cur.length) { cur.push(field); rows.push(cur); }
+  // drop trailing empty row
+  while (rows.length && rows[rows.length-1].every(x => x === '')) rows.pop();
+  return rows;
+}
+
+function impLog(msg, cls) {
+  const el = document.getElementById('impLog');
+  const line = document.createElement('div');
+  if (cls === 'err') line.style.color = 'var(--pos)';
+  if (cls === 'ok')  line.style.color = 'var(--neg)';
+  line.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function runImport() {
+  const tableName = document.getElementById('impTable').value;
+  const token = document.getElementById('impToken').value.trim();
+  const fileInput = document.getElementById('impFile');
+  const cfg = IMPORT_CONFIG[tableName];
+  if (!token) { impLog('Missing admin token.', 'err'); return; }
+  if (!fileInput.files.length) { impLog('No file selected.', 'err'); return; }
+
+  const file = fileInput.files[0];
+  impLog('Reading ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)…');
+  const text = await file.text();
+  const rows = parseCSV(text);
+  if (rows.length < 2) { impLog('CSV has no data rows.', 'err'); return; }
+
+  const header = rows.shift().map(h => String(h || '').trim());
+  const headerNorm = {};
+  header.forEach((h, i) => { headerNorm[normKey(h)] = i; });
+
+  // Map each DB col → source column index (with aliases)
+  const mapping = {};
+  cfg.dbCols.forEach(dbCol => {
+    const alias = cfg.aliases[dbCol];
+    if (alias) {
+      const ai = headerNorm[normKey(alias)];
+      if (ai !== undefined) { mapping[dbCol] = ai; return; }
+    }
+    const i = headerNorm[normKey(dbCol)];
+    if (i !== undefined) mapping[dbCol] = i;
+  });
+  const found = Object.keys(mapping);
+  const missing = cfg.dbCols.filter(c => !(c in mapping));
+  impLog(`Header cols detected: ${header.length}. Mapped ${found.length}/${cfg.dbCols.length} DB cols. Missing: ${missing.join(', ') || '(none)'}`);
+  impLog('Rows to push: ' + rows.length);
+
+  // Build INSERT OR REPLACE statements
+  const colList = cfg.dbCols.join(',');
+  const qMarks  = cfg.dbCols.map(() => '?').join(',');
+  const sql = `INSERT OR REPLACE INTO ${tableName} (${colList}) VALUES (${qMarks})`;
+
+  const BATCH = 500;
+  let pushed = 0, failed = 0;
+  const t0 = performance.now();
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const slice = rows.slice(i, i + BATCH);
+    const statements = slice.map(row => ({
+      sql,
+      args: cfg.dbCols.map(c => {
+        const j = mapping[c];
+        return (j != null && j < row.length) ? row[j] : '';
+      }),
+    }));
+    try {
+      const r = await fetch('/api/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+        body: JSON.stringify({ statements }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? JSON.stringify(j.error).slice(0,200) : await r.text()));
+      pushed += slice.length;
+    } catch (e) {
+      failed += slice.length;
+      impLog('Batch ' + (i / BATCH + 1) + ' FAILED: ' + e.message, 'err');
+    }
+    impLog(`Progress: ${pushed}/${rows.length} pushed (${failed} failed)`);
+  }
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  impLog(`Done. Pushed ${pushed} rows in ${secs}s. Failed ${failed}.`, failed ? 'err' : 'ok');
+}
+
+async function wipeTable() {
+  const tableName = document.getElementById('impTable').value;
+  const token = document.getElementById('impToken').value.trim();
+  if (!token) { impLog('Missing admin token.', 'err'); return; }
+  if (!confirm('DELETE all rows from ' + tableName + '?')) return;
+  const r = await fetch('/api/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    body: JSON.stringify({ statements: [{ sql: 'DELETE FROM ' + tableName, args: [] }] }),
+  });
+  if (r.ok) impLog('Wiped table ' + tableName, 'ok');
+  else impLog('Wipe failed: HTTP ' + r.status, 'err');
+}
+
+document.getElementById('impStart').addEventListener('click', () => runImport().catch(e => impLog(e.message, 'err')));
+document.getElementById('impClear').addEventListener('click', () => wipeTable().catch(e => impLog(e.message, 'err')));
+
 // Initial load
 refresh();
