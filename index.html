@@ -234,6 +234,7 @@
     <button class="nav-item" data-view="tasks"><span class="ico">▤</span><span>By Task</span></button>
     <button class="nav-item" data-view="reviewers"><span class="ico">◉</span><span>By Reviewer</span></button>
     <button class="nav-item" data-view="rows"><span class="ico">≡</span><span>Assignments</span></button>
+    <button class="nav-item" data-view="import"><span class="ico">↥</span><span>Import CSV</span></button>
   </nav>
   <div class="nav-footer">
     <button class="footer-btn" id="themeToggle"><span class="ico">◐</span><span>Toggle theme</span></button>
@@ -250,12 +251,16 @@
     <div class="filters">
       <div class="search"><input class="input" id="q" type="search" placeholder="Search reviewer, task, match…"></div>
       <div class="segment" id="rangeSeg">
-        <button data-range="week">Week</button>
-        <button data-range="month" class="active">Month</button>
-        <button data-range="quarter">Quarter</button>
-        <button data-range="year">Year</button>
+        <button data-range="30d">30d</button>
+        <button data-range="3m">3m</button>
+        <button data-range="6m">6m</button>
+        <button data-range="12m" class="active">12m</button>
+        <button data-range="ytd">YTD</button>
         <button data-range="all">All</button>
       </div>
+      <input class="input" type="date" id="dateStart" title="Start date">
+      <span style="color:var(--text-dim)">→</span>
+      <input class="input" type="date" id="dateEnd" title="End date">
     </div>
   </div>
 
@@ -339,6 +344,52 @@
     <div class="panel">
       <div class="panel-header"><h3 class="panel-title">Reviewer breakdown</h3></div>
       <div class="table-wrap"><table id="tblReviewer"></table></div>
+    </div>
+  </section>
+
+  <!-- IMPORT -->
+  <section id="view-import" class="view hidden">
+    <div class="panel">
+      <h3 class="panel-title">Bulk CSV Import</h3>
+      <div class="panel-sub" style="margin-bottom:16px">
+        Upload a CSV exported from Google Sheets. Rows are UPSERTed by primary key —
+        safe to re-upload the same file (updates existing, adds new).
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px;">
+        <div>
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Target table</div>
+          <select id="impTable" class="select" style="width:100%">
+            <option value="assignments">assignments</option>
+            <option value="data_logs">data_logs</option>
+            <option value="productivity_config">productivity_config</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Admin token</div>
+          <input id="impToken" class="input" type="password" placeholder="ADMIN_TOKEN from Cloudflare env" style="width:100%">
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">CSV file</div>
+        <input id="impFile" class="input" type="file" accept=".csv,text/csv" style="width:100%">
+      </div>
+      <div style="margin-top:16px;display:flex;gap:8px;align-items:center;">
+        <button id="impStart" class="btn btn-primary">Start import</button>
+        <button id="impClear" class="btn">Wipe table first (DELETE all rows)</button>
+      </div>
+      <div id="impLog" style="margin-top:16px;padding:12px;background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;max-height:400px;overflow:auto;color:var(--text-muted);"></div>
+    </div>
+    <div class="panel">
+      <h3 class="panel-title">Column mapping reference</h3>
+      <div class="panel-sub" style="margin-bottom:10px">CSV header names auto-match DB columns (case + punctuation insensitive). Special aliases:</div>
+      <table style="font-size:12px;">
+        <thead><tr><th>Table</th><th>Source column</th><th>→ DB column</th></tr></thead>
+        <tbody>
+          <tr><td>data_logs</td><td><code>hr_code</code></td><td><code>code</code></td></tr>
+          <tr><td>assignments</td><td><code>assignment date</code></td><td><code>assignment_date</code></td></tr>
+          <tr><td>assignments</td><td><code>SLA</code>, <code>Match Type</code></td><td><code>sla</code>, <code>match_type</code></td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 

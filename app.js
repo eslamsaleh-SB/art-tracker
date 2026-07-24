@@ -40,26 +40,42 @@ function fmt(n) {
   return round1(n);
 }
 
-// Range start (YYYY-MM-DD) based on current UI range selection
-function rangeStart(range) {
+// Compute {start, end} YYYY-MM-DD from a preset. Trailing-window presets
+// (last 30d, 3m, 6m, 12m) show trend leading up to today — MoM/QoQ view.
+function presetRange(preset) {
   const now = new Date();
   const iso = d => d.toISOString().slice(0,10);
-  if (range === 'all')     return '1970-01-01';
-  if (range === 'week')    { const d = new Date(now); d.setDate(now.getDate() - now.getDay()); return iso(d); }
-  if (range === 'month')   return now.toISOString().slice(0,7) + '-01';
-  if (range === 'quarter') { const qm = Math.floor(now.getMonth()/3)*3; return now.getFullYear() + '-' + String(qm+1).padStart(2,'0') + '-01'; }
-  if (range === 'year')    return now.getFullYear() + '-01-01';
-  return '1970-01-01';
+  const end = iso(now);
+  const d = new Date(now);
+  if (preset === '30d') { d.setDate(now.getDate() - 30); return { start: iso(d), end }; }
+  if (preset === '3m')  { d.setMonth(now.getMonth() - 3); return { start: iso(d), end }; }
+  if (preset === '6m')  { d.setMonth(now.getMonth() - 6); return { start: iso(d), end }; }
+  if (preset === '12m') { d.setMonth(now.getMonth() - 12); return { start: iso(d), end }; }
+  if (preset === 'ytd') return { start: now.getFullYear() + '-01-01', end };
+  if (preset === 'all') return { start: '1970-01-01', end: '2999-12-31' };
+  return { start: '1970-01-01', end };
 }
-function rangeLabel(range) {
-  return { week:'This week', month:'This month', quarter:'This quarter', year:'This year', all:'All time' }[range] || range;
+function rangeLabel(range, start, end) {
+  const presets = { '30d':'Last 30 days','3m':'Last 3 months','6m':'Last 6 months','12m':'Last 12 months','ytd':'Year to date','all':'All time' };
+  if (presets[range]) return presets[range];
+  return start + ' → ' + end;
+}
+// Read current range from state; if custom, use its dates; else compute from preset
+function currentRange() {
+  const custom = STATE.customStart || STATE.customEnd;
+  if (custom) return { start: STATE.customStart || '1970-01-01', end: STATE.customEnd || '2999-12-31' };
+  return presetRange(STATE.range);
 }
 
-// SQL expression for granularity bucket key
+// SQL expression for granularity bucket key.
+// Week uses %U (Sunday-start) instead of %W (Monday-start).
 function granExpr(col, gran) {
-  // assignment_date is stored either as 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' — use substr for portability
   if (gran === 'day')     return `substr(${col},1,10)`;
-  if (gran === 'week')    return `strftime('%Y-W%W', ${col})`;
+  if (gran === 'week')    {
+    // Return the Sunday date of that week — e.g. '2026-07-19'.
+    // This gives a real date on the axis instead of "2026-W29".
+    return `date(${col}, 'weekday 0', '-7 days')`;
+  }
   if (gran === 'month')   return `substr(${col},1,7)`;
   if (gran === 'quarter') return `substr(${col},1,4) || '-Q' || ((cast(substr(${col},6,2) AS INTEGER) - 1)/3 + 1)`;
   if (gran === 'year')    return `substr(${col},1,4)`;
@@ -71,7 +87,9 @@ function granExpr(col, gran) {
 // ============================================================
 const STATE = {
   view: 'overview',
-  range: 'month',
+  range: '12m',        // default = last 12 months (MoM view)
+  customStart: '',     // if user picks custom dates, presets are ignored
+  customEnd: '',
   gran: 'month',       // overview time chart granularity
   taskGran: 'month',   // task-card chart granularity
   q: '',
@@ -163,15 +181,17 @@ function setView(name) {
 }
 
 async function refresh() {
-  document.getElementById('pageSub').textContent = 'Loading ' + rangeLabel(STATE.range) + '…';
+  const R = currentRange();
+  const label = rangeLabel(STATE.range, R.start, R.end);
+  document.getElementById('pageSub').textContent = 'Loading ' + label + '…';
   const t0 = performance.now();
   try {
-    if (STATE.view === 'overview')  await loadOverview();
-    if (STATE.view === 'tasks')     await loadTasks();
-    if (STATE.view === 'reviewers') await loadReviewers();
-    if (STATE.view === 'rows')      await loadRows();
+    if (STATE.view === 'overview')  await loadOverview(R);
+    if (STATE.view === 'tasks')     await loadTasks(R);
+    if (STATE.view === 'reviewers') await loadReviewers(R);
+    if (STATE.view === 'rows')      await loadRows(R);
     const dt = Math.round(performance.now() - t0);
-    document.getElementById('pageSub').textContent = `${rangeLabel(STATE.range)} · ${dt} ms`;
+    document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {
     document.getElementById('pageSub').innerHTML = `<span class="error">ERR: ${esc(e.message)}</span>`;
     console.error(e);
@@ -179,9 +199,9 @@ async function refresh() {
 }
 
 // --- Overview ---
-async function loadOverview() {
-  const start = rangeStart(STATE.range);
+async function loadOverview(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const start = R.start, end = R.end;
 
   // KPIs
   const kpi = (await query(`
@@ -191,9 +211,9 @@ async function loadOverview() {
       COUNT(DISTINCT code)                  AS reviewers,
       COUNT(DISTINCT task)                  AS tasks
     FROM assignments
-    WHERE assignment_date >= ?1
-      AND (?2 = '' OR reviewer_name LIKE ?2 OR task LIKE ?2 OR code LIKE ?2 OR team LIKE ?2)
-  `, [start, like])).rows[0] || {};
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
+  `, [start, end, like])).rows[0] || {};
 
   const kpiHtml = [
     ['Assignments',       kpi.assignments,        'total rows'],
@@ -213,10 +233,10 @@ async function loadOverview() {
   const trend = (await query(`
     SELECT ${gexpr} AS bucket, COUNT(*) AS n
     FROM assignments
-    WHERE assignment_date >= ?1
-      AND (?2 = '' OR reviewer_name LIKE ?2 OR task LIKE ?2 OR code LIKE ?2 OR team LIKE ?2)
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
     GROUP BY bucket ORDER BY bucket
-  `, [start, like])).rows;
+  `, [start, end, like])).rows;
   line('chartOverviewTime',
     trend.map(r => r.bucket),
     [{ label: 'Assignments', data: trend.map(r => r.n), color: css('--accent') }],
@@ -226,28 +246,28 @@ async function loadOverview() {
   const byTask = (await query(`
     SELECT task, COUNT(*) AS n
     FROM assignments
-    WHERE assignment_date >= ?1
-      AND (?2 = '' OR reviewer_name LIKE ?2 OR task LIKE ?2 OR code LIKE ?2 OR team LIKE ?2)
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
       AND task IS NOT NULL AND task <> ''
     GROUP BY task ORDER BY n DESC
-  `, [start, like])).rows;
+  `, [start, end, like])).rows;
   bar('chartOverviewTasks', byTask.map(r => r.task), byTask.map(r => r.n), 'Assignments');
 
   const byTeam = (await query(`
     SELECT team, COUNT(*) AS n
     FROM assignments
-    WHERE assignment_date >= ?1
-      AND (?2 = '' OR reviewer_name LIKE ?2 OR task LIKE ?2 OR code LIKE ?2 OR team LIKE ?2)
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
       AND team IS NOT NULL AND team <> ''
     GROUP BY team ORDER BY n DESC
-  `, [start, like])).rows;
+  `, [start, end, like])).rows;
   bar('chartOverviewTeams', byTeam.map(r => r.team), byTeam.map(r => r.n), 'Assignments');
 }
 
 // --- Tasks: grid of cards, each expandable ---
-async function loadTasks() {
-  const start = rangeStart(STATE.range);
+async function loadTasks(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const start = R.start, end = R.end;
 
   // Per-task summary + time series in one shot per task requires N+1 queries
   // for expandable charts. To stay fast, only fetch summaries here; each
@@ -261,12 +281,12 @@ async function loadTasks() {
       AVG(dl.actual_time_taken) AS avg_actual
     FROM assignments a
     LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date >= ?1
-      AND (?2 = '' OR a.reviewer_name LIKE ?2 OR a.task LIKE ?2 OR a.code LIKE ?2)
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND a.task IS NOT NULL AND a.task <> ''
     GROUP BY a.task
     ORDER BY matches_listed DESC
-  `, [start, like])).rows;
+  `, [start, end, like])).rows;
 
   const grid = document.getElementById('taskGrid');
   if (!summary.length) {
@@ -309,12 +329,12 @@ async function loadTasks() {
   const trend = (await query(`
     SELECT a.task AS task, ${gexpr} AS bucket, COUNT(*) AS n
     FROM assignments a
-    WHERE a.assignment_date >= ?1
-      AND (?2 = '' OR a.reviewer_name LIKE ?2 OR a.task LIKE ?2 OR a.code LIKE ?2)
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND a.task IS NOT NULL AND a.task <> ''
     GROUP BY a.task, bucket
     ORDER BY a.task, bucket
-  `, [start, like])).rows;
+  `, [start, end, like])).rows;
 
   // Bucket labels union (so all cards share the same X axis)
   const bucketsSet = new Set();
@@ -348,9 +368,9 @@ async function loadTasks() {
 }
 
 // --- Reviewers view — scoped to a single task ---
-async function loadReviewers() {
-  const start = rangeStart(STATE.range);
+async function loadReviewers(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const start = R.start, end = R.end;
 
   // Populate task dropdown if empty
   const sel = document.getElementById('revTaskSel');
@@ -366,8 +386,8 @@ async function loadReviewers() {
   const task = sel.value;
   STATE.selectedTask = task;
 
-  const taskFilter = task ? 'AND a.task = ?3' : '';
-  const args = task ? [start, like, task] : [start, like];
+  const taskFilter = task ? 'AND a.task = ?4' : '';
+  const args = task ? [start, end, like, task] : [start, end, like];
 
   const revs = (await query(`
     SELECT
@@ -381,11 +401,11 @@ async function loadReviewers() {
       MAX(dl.actual_time_taken) AS max_actual
     FROM assignments a
     LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date >= ?1
-      AND (?2 = '' OR a.reviewer_name LIKE ?2 OR a.team LIKE ?2 OR a.code LIKE ?2)
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
       ${taskFilter}
     GROUP BY a.code, a.reviewer_name, a.team
-    HAVING avg_actual IS NOT NULL OR ?2 <> ''
+    HAVING avg_actual IS NOT NULL OR ?3 <> ''
     ORDER BY (avg_actual IS NULL) ASC, avg_actual ASC
     LIMIT 300
   `, args)).rows;
@@ -412,18 +432,18 @@ async function loadReviewers() {
 }
 
 // --- Rows — minimal columns (no review time, diff, notes) ---
-async function loadRows() {
-  const start = rangeStart(STATE.range);
+async function loadRows(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const start = R.start, end = R.end;
   const { rows } = await query(`
     SELECT match_id, assignment_date, competition, home_team, away_team,
            code, reviewer_name, team, task, half, side
     FROM assignments
-    WHERE assignment_date >= ?1
-      AND (?2 = '' OR reviewer_name LIKE ?2 OR match_id LIKE ?2 OR task LIKE ?2 OR code LIKE ?2 OR home_team LIKE ?2 OR away_team LIKE ?2)
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
     ORDER BY assignment_date DESC, match_id DESC
     LIMIT 500
-  `, [start, like]);
+  `, [start, end, like]);
   document.getElementById('rowsCount').textContent = rows.length + ' rows (max 500)';
   renderTable('tblRows', [
     { key:'match_id',        label:'Match ID' },
@@ -448,9 +468,22 @@ document.querySelectorAll('.nav-item').forEach(b => b.addEventListener('click', 
 document.getElementById('rangeSeg').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   STATE.range = b.dataset.range;
+  STATE.customStart = ''; STATE.customEnd = '';
+  document.getElementById('dateStart').value = '';
+  document.getElementById('dateEnd').value = '';
   document.querySelectorAll('#rangeSeg button').forEach(x => x.classList.toggle('active', x === b));
   refresh();
 });
+function onDateChange() {
+  STATE.customStart = document.getElementById('dateStart').value;
+  STATE.customEnd   = document.getElementById('dateEnd').value;
+  if (STATE.customStart || STATE.customEnd) {
+    document.querySelectorAll('#rangeSeg button').forEach(x => x.classList.remove('active'));
+  }
+  refresh();
+}
+document.getElementById('dateStart').addEventListener('change', onDateChange);
+document.getElementById('dateEnd').addEventListener('change', onDateChange);
 
 document.getElementById('granSeg').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
