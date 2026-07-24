@@ -153,9 +153,10 @@
 
   /* --- Task cards (grid of drill-down cards) --- */
   .task-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    display: grid; grid-template-columns: 1fr 1fr;
     gap: 12px;
   }
+  @media (max-width: 900px) { .task-grid { grid-template-columns: 1fr; } }
   .task-card {
     background: var(--card); border: 1px solid var(--border); border-radius: 12px;
     padding: 16px; box-shadow: var(--shadow); transition: transform 0.15s, border-color 0.15s;
@@ -264,51 +265,31 @@
     </div>
   </div>
 
-  <!-- OVERVIEW -->
+  <!-- OVERVIEW: KPI cards only -->
   <section id="view-overview" class="view">
     <div class="kpi-grid" id="kpis"></div>
-    <div class="row">
-      <div class="col">
-        <div class="panel">
-          <div class="panel-header">
-            <div>
-              <h3 class="panel-title">Assignments over time</h3>
-              <div class="panel-sub">Grouped by selected granularity</div>
-            </div>
-            <div class="segment" id="granSeg">
-              <button data-gran="day">Day</button>
-              <button data-gran="week">Week</button>
-              <button data-gran="month" class="active">Month</button>
-              <button data-gran="quarter">Quarter</button>
-              <button data-gran="year">Year</button>
-            </div>
-          </div>
-          <div class="chart-wrap tall"><canvas id="chartOverviewTime"></canvas></div>
-        </div>
-      </div>
-    </div>
-    <div class="row">
-      <div class="col">
-        <div class="panel">
-          <div class="panel-header"><h3 class="panel-title">Assignments per task</h3></div>
-          <div class="chart-wrap"><canvas id="chartOverviewTasks"></canvas></div>
-        </div>
-      </div>
-      <div class="col">
-        <div class="panel">
-          <div class="panel-header"><h3 class="panel-title">Assignments per team</h3></div>
-          <div class="chart-wrap"><canvas id="chartOverviewTeams"></canvas></div>
-        </div>
-      </div>
-    </div>
   </section>
 
   <!-- TASKS -->
   <section id="view-tasks" class="view hidden">
-    <div class="panel">
-      <div class="panel-header">
+    <div class="row">
+      <div class="col">
+        <div class="panel">
+          <div class="panel-header"><h3 class="panel-title">Total assignments per task</h3></div>
+          <div class="chart-wrap"><canvas id="chartTaskCount"></canvas></div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel">
+          <div class="panel-header"><h3 class="panel-title">Avg review time per task (min)</h3></div>
+          <div class="chart-wrap"><canvas id="chartTaskAvg"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel" style="padding:12px 16px;">
+      <div class="panel-header" style="margin:0;">
         <div>
-          <h3 class="panel-title">Task drill-down</h3>
+          <h3 class="panel-title">Per-task breakdown</h3>
           <div class="panel-sub">Click <b>+</b> to expand a task and see its trend</div>
         </div>
         <div class="segment" id="taskGranSeg">

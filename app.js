@@ -198,12 +198,12 @@ async function refresh() {
   }
 }
 
-// --- Overview ---
+// --- Overview: KPI cards only ---
 async function loadOverview(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
 
-  // KPIs
+  // Global KPI counts — assignments-only (no JOIN inflation)
   const kpi = (await query(`
     SELECT
       COUNT(*)                              AS assignments,
@@ -215,78 +215,111 @@ async function loadOverview(R) {
       AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
   `, [start, end, like])).rows[0] || {};
 
-  const kpiHtml = [
-    ['Assignments',       kpi.assignments,        'total rows'],
-    ['Distinct matches',  kpi.distinct_matches,   'unique games'],
-    ['Reviewers',         kpi.reviewers,          'active in range'],
-    ['Tasks',             kpi.tasks,              'assigned in range'],
-  ].map(([label, value, sub]) => `
+  // Overall avg review time = avg across all data_logs matching assignments
+  // in range. One row per (matchid, code) log — no over-count.
+  const overall = (await query(`
+    SELECT AVG(dl.actual_time_taken) AS avg_actual, COUNT(dl.matchid) AS log_rows
+    FROM data_logs dl
+    WHERE EXISTS (
+      SELECT 1 FROM assignments a
+      WHERE a.match_id = dl.matchid AND a.code = dl.code
+        AND a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
+    )
+  `, [start, end, like])).rows[0] || {};
+
+  // Fastest / slowest task by avg (need >= 5 samples to avoid outliers)
+  const perTask = (await query(`
+    SELECT task, avg_actual, samples FROM (
+      SELECT a.task AS task,
+             AVG(dl.actual_time_taken) AS avg_actual,
+             COUNT(dl.matchid) AS samples
+      FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
+        AND a.task IS NOT NULL AND a.task <> ''
+      GROUP BY a.task
+      HAVING samples >= 5
+    )
+    ORDER BY avg_actual ASC
+  `, [start, end, like])).rows;
+  const fastest = perTask[0];
+  const slowest = perTask[perTask.length - 1];
+
+  const cards = [
+    { label: 'Assignments',       value: fmt(kpi.assignments),       sub: 'total rows' },
+    { label: 'Distinct matches',  value: fmt(kpi.distinct_matches),  sub: 'unique games' },
+    { label: 'Reviewers',         value: fmt(kpi.reviewers),         sub: 'active in range' },
+    { label: 'Tasks',             value: fmt(kpi.tasks),             sub: 'assigned in range' },
+    { label: 'Avg review time',   value: overall.avg_actual != null ? fmt(overall.avg_actual) + ' min' : '—',
+      sub: fmt(overall.log_rows) + ' log rows' },
+    { label: 'Fastest task',      value: fastest ? fastest.task : '—',
+      sub: fastest ? fmt(fastest.avg_actual) + ' min avg · ' + fmt(fastest.samples) + ' logs' : '—' },
+    { label: 'Slowest task',      value: slowest && slowest !== fastest ? slowest.task : '—',
+      sub: slowest && slowest !== fastest ? fmt(slowest.avg_actual) + ' min avg · ' + fmt(slowest.samples) + ' logs' : '—' },
+  ];
+  document.getElementById('kpis').innerHTML = cards.map(c => `
     <div class="kpi">
-      <div class="kpi-label">${label}</div>
-      <div class="kpi-value">${fmt(value)}</div>
-      <div class="kpi-sub">${sub}</div>
-    </div>`).join('');
-  document.getElementById('kpis').innerHTML = kpiHtml;
-
-  // Time series (assignments over time)
-  const gexpr = granExpr('assignment_date', STATE.gran);
-  const trend = (await query(`
-    SELECT ${gexpr} AS bucket, COUNT(*) AS n
-    FROM assignments
-    WHERE assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
-    GROUP BY bucket ORDER BY bucket
-  `, [start, end, like])).rows;
-  line('chartOverviewTime',
-    trend.map(r => r.bucket),
-    [{ label: 'Assignments', data: trend.map(r => r.n), color: css('--accent') }],
-  );
-
-  // Per-task and per-team bars
-  const byTask = (await query(`
-    SELECT task, COUNT(*) AS n
-    FROM assignments
-    WHERE assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
-      AND task IS NOT NULL AND task <> ''
-    GROUP BY task ORDER BY n DESC
-  `, [start, end, like])).rows;
-  bar('chartOverviewTasks', byTask.map(r => r.task), byTask.map(r => r.n), 'Assignments');
-
-  const byTeam = (await query(`
-    SELECT team, COUNT(*) AS n
-    FROM assignments
-    WHERE assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
-      AND team IS NOT NULL AND team <> ''
-    GROUP BY team ORDER BY n DESC
-  `, [start, end, like])).rows;
-  bar('chartOverviewTeams', byTeam.map(r => r.team), byTeam.map(r => r.n), 'Assignments');
+      <div class="kpi-label">${esc(c.label)}</div>
+      <div class="kpi-value">${esc(c.value)}</div>
+      <div class="kpi-sub">${esc(c.sub)}</div>
+    </div>
+  `).join('');
 }
 
-// --- Tasks: grid of cards, each expandable ---
+// --- Tasks: two summary charts + 2-col cards, each expandable ---
 async function loadTasks(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
 
-  // Per-task summary + time series in one shot per task requires N+1 queries
-  // for expandable charts. To stay fast, only fetch summaries here; each
-  // card lazy-loads its own trend on expand.
+  // Query 1 — pure assignment counts + top month per task, one row per task.
+  // Uses window function to rank months by count within each task.
   const summary = (await query(`
-    SELECT
-      a.task AS task,
-      COUNT(*) AS matches_listed,
-      COUNT(DISTINCT a.match_id) AS distinct_matches,
-      COUNT(DISTINCT a.code) AS reviewers,
-      AVG(dl.actual_time_taken) AS avg_actual
+    WITH filtered AS (
+      SELECT match_id, code, task, substr(assignment_date, 1, 7) AS ym
+      FROM assignments
+      WHERE assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
+        AND task IS NOT NULL AND task <> ''
+    ),
+    counts AS (
+      SELECT task, COUNT(*) AS assignments, COUNT(DISTINCT match_id) AS distinct_matches
+      FROM filtered GROUP BY task
+    ),
+    ranked_months AS (
+      SELECT task, ym, COUNT(*) AS n,
+        ROW_NUMBER() OVER (PARTITION BY task ORDER BY COUNT(*) DESC) AS rn
+      FROM filtered GROUP BY task, ym
+    ),
+    top_month AS (SELECT task, ym FROM ranked_months WHERE rn = 1)
+    SELECT c.task, c.assignments, c.distinct_matches, t.ym AS top_month
+    FROM counts c LEFT JOIN top_month t ON t.task = c.task
+    ORDER BY c.assignments DESC
+  `, [start, end, like])).rows;
+
+  // Query 2 — avg review time per task from data_logs, WITHOUT joining
+  // multiplies. One row per (matchid, code) log; average grouped by task
+  // via subquery lookup.
+  const avgRows = (await query(`
+    SELECT a.task AS task, AVG(dl.actual_time_taken) AS avg_actual
     FROM assignments a
-    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND a.task IS NOT NULL AND a.task <> ''
     GROUP BY a.task
-    ORDER BY matches_listed DESC
   `, [start, end, like])).rows;
+  const avgByTask = {};
+  avgRows.forEach(r => { avgByTask[r.task] = r.avg_actual; });
+
+  // Merge avg into summary
+  summary.forEach(t => { t.avg_actual = avgByTask[t.task] ?? null; });
+
+  // Top charts
+  bar('chartTaskCount', summary.map(t => t.task), summary.map(t => t.assignments), 'Total assignments');
+  const withAvg = summary.filter(t => t.avg_actual != null);
+  bar('chartTaskAvg', withAvg.map(t => t.task), withAvg.map(t => round1(t.avg_actual)), 'Avg review time (min)');
 
   const grid = document.getElementById('taskGrid');
   if (!summary.length) {
@@ -302,29 +335,28 @@ async function loadTasks(R) {
       <div class="task-card-stats">
         <div class="task-card-stat">
           <div class="task-card-stat-label">Assignments</div>
-          <div class="task-card-stat-value">${fmt(t.matches_listed)}</div>
+          <div class="task-card-stat-value">${fmt(t.assignments)}</div>
         </div>
         <div class="task-card-stat">
           <div class="task-card-stat-label">Distinct matches</div>
           <div class="task-card-stat-value">${fmt(t.distinct_matches)}</div>
         </div>
         <div class="task-card-stat">
-          <div class="task-card-stat-label">Reviewers</div>
-          <div class="task-card-stat-value">${fmt(t.reviewers)}</div>
+          <div class="task-card-stat-label">Avg time (min)</div>
+          <div class="task-card-stat-value">${t.avg_actual != null ? fmt(t.avg_actual) : '—'}</div>
         </div>
         <div class="task-card-stat">
-          <div class="task-card-stat-label">Avg time (min)</div>
-          <div class="task-card-stat-value">${fmt(t.avg_actual)}</div>
+          <div class="task-card-stat-label">Top month</div>
+          <div class="task-card-stat-value">${esc(t.top_month || '—')}</div>
         </div>
       </div>
-      <div class="task-card-chart"><canvas id="miniTaskChart_${esc(t.task).replace(/\W/g,'_')}"></canvas></div>
       <div class="task-card-detail">
         <div class="chart-wrap short" style="margin-top:8px"><canvas id="fullTaskChart_${esc(t.task).replace(/\W/g,'_')}"></canvas></div>
       </div>
     </div>
   `).join('');
 
-  // Lazy-load mini charts (all tasks' trends in one query, then split)
+  // Per-task trend (single query, split by task)
   const gexpr = granExpr('a.assignment_date', STATE.taskGran);
   const trend = (await query(`
     SELECT a.task AS task, ${gexpr} AS bucket, COUNT(*) AS n
@@ -336,7 +368,6 @@ async function loadTasks(R) {
     ORDER BY a.task, bucket
   `, [start, end, like])).rows;
 
-  // Bucket labels union (so all cards share the same X axis)
   const bucketsSet = new Set();
   trend.forEach(r => bucketsSet.add(r.bucket));
   const buckets = Array.from(bucketsSet).sort();
@@ -345,15 +376,13 @@ async function loadTasks(R) {
     if (!byTaskData[r.task]) byTaskData[r.task] = {};
     byTaskData[r.task][r.bucket] = r.n;
   });
-
   summary.forEach(t => {
     const safe = t.task.replace(/\W/g, '_');
     const dataArr = buckets.map(b => byTaskData[t.task]?.[b] || 0);
-    line('miniTaskChart_' + safe, buckets, [{ label: t.task, data: dataArr, color: css('--accent') }]);
     line('fullTaskChart_' + safe, buckets, [{ label: t.task, data: dataArr, color: css('--accent') }], { fill: true });
   });
 
-  // Wire expand
+  // Expand button wiring
   grid.querySelectorAll('.task-card-expand').forEach(btn => {
     btn.onclick = e => {
       e.stopPropagation();
@@ -389,26 +418,43 @@ async function loadReviewers(R) {
   const taskFilter = task ? 'AND a.task = ?4' : '';
   const args = task ? [start, end, like, task] : [start, end, like];
 
-  const revs = (await query(`
+  // Two-step: pure counts from assignments, then avg time from data_logs.
+  // Avoids row-multiplication from the JOIN.
+  const counts = (await query(`
     SELECT
-      a.code AS code,
-      a.reviewer_name AS reviewer_name,
-      a.team AS team,
+      code, reviewer_name, team,
       COUNT(*) AS matches_listed,
-      COUNT(DISTINCT a.match_id) AS distinct_matches,
-      AVG(dl.actual_time_taken) AS avg_actual,
-      MIN(dl.actual_time_taken) AS min_actual,
-      MAX(dl.actual_time_taken) AS max_actual
+      COUNT(DISTINCT match_id) AS distinct_matches
     FROM assignments a
-    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
       ${taskFilter}
-    GROUP BY a.code, a.reviewer_name, a.team
-    HAVING avg_actual IS NOT NULL OR ?3 <> ''
-    ORDER BY (avg_actual IS NULL) ASC, avg_actual ASC
-    LIMIT 300
+    GROUP BY code, reviewer_name, team
   `, args)).rows;
+
+  const stats = (await query(`
+    SELECT a.code AS code,
+           AVG(dl.actual_time_taken) AS avg_actual,
+           MIN(dl.actual_time_taken) AS min_actual,
+           MAX(dl.actual_time_taken) AS max_actual
+    FROM assignments a
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
+      ${taskFilter}
+    GROUP BY a.code
+  `, args)).rows;
+  const statsBy = {};
+  stats.forEach(s => { statsBy[s.code] = s; });
+
+  const revs = counts.map(c => ({
+    ...c,
+    avg_actual: statsBy[c.code]?.avg_actual ?? null,
+    min_actual: statsBy[c.code]?.min_actual ?? null,
+    max_actual: statsBy[c.code]?.max_actual ?? null,
+  })).filter(r => r.avg_actual != null)
+     .sort((a, b) => a.avg_actual - b.avg_actual)
+     .slice(0, 300);
 
   // Chart: top 20 fastest (lowest avg) with data
   const withData = revs.filter(r => r.avg_actual != null).slice(0, 20);
@@ -485,12 +531,7 @@ function onDateChange() {
 document.getElementById('dateStart').addEventListener('change', onDateChange);
 document.getElementById('dateEnd').addEventListener('change', onDateChange);
 
-document.getElementById('granSeg').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
-  STATE.gran = b.dataset.gran;
-  document.querySelectorAll('#granSeg button').forEach(x => x.classList.toggle('active', x === b));
-  if (STATE.view === 'overview') refresh();
-});
+// Overview granularity control was removed — no listener needed.
 document.getElementById('taskGranSeg').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   STATE.taskGran = b.dataset.gran;
