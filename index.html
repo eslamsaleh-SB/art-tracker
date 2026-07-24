@@ -3,23 +3,89 @@
 <head>
 <meta charset="utf-8">
 <title>ART Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border-bottom: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; white-space: nowrap; }
-  th { background: #f9fafb; position: sticky; top: 0; }
-  .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
-  input, button { padding: 6px 10px; font-size: 13px; }
+  :root { --bg:#f7f8fa; --card:#fff; --border:#e5e7eb; --text:#1f2937; --muted:#6b7280; --accent:#2563eb; --pos:#b91c1c; --neg:#047857; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); font-size:13px; }
+  h1 { margin:0 0 4px; font-size:20px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:12px; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--card); padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:12px; }
+  .toolbar input, .toolbar select, .toolbar button { padding:6px 10px; font-size:13px; border:1px solid var(--border); border-radius:6px; background:#fff; }
+  .toolbar button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+  .toolbar button.secondary { background:#fff; color:var(--accent); }
+  .toolbar .chip { background:#eef2ff; color:var(--accent); padding:4px 10px; border-radius:20px; font-weight:600; }
+  .tabs { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .tab { padding:6px 14px; background:#fff; border:0; cursor:pointer; font-size:13px; color:var(--text); }
+  .tab.active { background:var(--accent); color:#fff; }
+  .tab + .tab { border-left:1px solid var(--border); }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:12px; box-shadow:0 1px 2px rgba(16,24,40,0.04); }
+  .panel h3 { margin:0 0 10px; font-size:14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:900px) { .grid { grid-template-columns:1fr; } }
+  .chart-wrap { position:relative; height:300px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { background:#fafbfc; text-align:left; position:sticky; top:0; }
+  th.num, td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .table-wrap { max-height:380px; overflow:auto; border:1px solid var(--border); border-radius:8px; background:var(--card); }
+  .loading, .error { padding:16px; text-align:center; color:var(--muted); }
+  .error { color:#b91c1c; }
 </style>
 </head>
 <body>
 <h1>ART Tracker</h1>
+<div class="sub" id="meta">Loading…</div>
+
 <div class="toolbar">
-  <input id="q" placeholder="Search reviewer, task, match…" />
-  <button id="reload">Reload</button>
-  <span id="meta"></span>
+  <div class="tabs">
+    <button class="tab active" data-tab="rows">Rows</button>
+    <button class="tab" data-tab="task">By Task</button>
+    <button class="tab" data-tab="reviewer">By Reviewer</button>
+  </div>
+  <input id="q" type="search" placeholder="Search reviewer, task, match…" />
+  <select id="fRange">
+    <option value="week">This week</option>
+    <option value="month" selected>This month</option>
+    <option value="quarter">This quarter</option>
+    <option value="all">All time</option>
+  </select>
+  <button id="reload" class="secondary">Reload</button>
+  <span class="chip" id="count">0 rows</span>
 </div>
-<table id="tbl"><thead></thead><tbody></tbody></table>
+
+<div id="tab-rows">
+  <div class="table-wrap"><table id="tblRows"></table></div>
+</div>
+
+<div id="tab-task" hidden>
+  <div class="grid">
+    <div class="panel">
+      <h3>Assignments per task</h3>
+      <div class="chart-wrap"><canvas id="chartTaskCount"></canvas></div>
+    </div>
+    <div class="panel">
+      <h3>Avg actual time per task (min)</h3>
+      <div class="chart-wrap"><canvas id="chartTaskAvg"></canvas></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Task breakdown</h3>
+    <div class="table-wrap"><table id="tblTask"></table></div>
+  </div>
+</div>
+
+<div id="tab-reviewer" hidden>
+  <div class="panel">
+    <h3>Top 20 reviewers by assignments</h3>
+    <div class="chart-wrap"><canvas id="chartReviewer"></canvas></div>
+  </div>
+  <div class="panel">
+    <h3>Reviewer breakdown</h3>
+    <div class="table-wrap"><table id="tblReviewer"></table></div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>
