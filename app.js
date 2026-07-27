@@ -1179,7 +1179,8 @@ async function runImport() {
   // Build INSERT OR REPLACE statements
   const colList = cfg.dbCols.join(',');
   const qMarks  = cfg.dbCols.map(() => '?').join(',');
-  const sql = `INSERT OR REPLACE INTO ${tableName} (${colList}) VALUES (${qMarks})`;
+  // INSERT OR IGNORE: same PK → skip. Prevents overwrites on repeat uploads.
+  const sql = `INSERT OR IGNORE INTO ${tableName} (${colList}) VALUES (${qMarks})`;
 
   const BATCH = 500;
   let pushed = 0, failed = 0;
