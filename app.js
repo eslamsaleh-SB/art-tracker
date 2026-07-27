@@ -513,16 +513,25 @@ async function loadTasks(R) {
     </div>
   `).join('');
 
+  // Trend = avg review time per (task, time-bucket), computed as
+  // AVG(match_total) — one match_total per (match_id, code).
   const gexpr = granExpr('a.assignment_date', STATE.taskGran);
   const trend = (await query(`
-    SELECT a.task AS task, ${gexpr} AS bucket, COUNT(*) AS n
-    FROM assignments a
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-      AND a.task IS NOT NULL AND a.task <> ''
-      ${efA.sql}
-    GROUP BY a.task, bucket
-    ORDER BY a.task, bucket
+    SELECT task, bucket, AVG(match_total) AS n
+    FROM (
+      SELECT a.task AS task, ${gexpr} AS bucket,
+             a.match_id AS match_id, a.code AS code,
+             SUM(dl.actual_time_taken) AS match_total
+      FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+        AND a.task IS NOT NULL AND a.task <> ''
+        ${efA.sql}
+      GROUP BY a.task, bucket, a.match_id, a.code
+    )
+    GROUP BY task, bucket
+    ORDER BY task, bucket
   `, [start, end, like, ...efA.args])).rows;
 
   const bucketsSet = new Set();
@@ -536,8 +545,14 @@ async function loadTasks(R) {
   const labels = buckets.map(b => fmtBucket(b, STATE.taskGran));
   summary.forEach(t => {
     const safe = t.task.replace(/\W/g, '_');
-    const dataArr = buckets.map(b => byTaskData[t.task]?.[b] || 0);
-    line('fullTaskChart_' + safe, labels, [{ label: t.task, data: dataArr, color: css('--accent') }], { fill: true });
+    const dataArr = buckets.map(b => {
+      const v = byTaskData[t.task]?.[b];
+      return v != null ? round1(v) : null;
+    });
+    line('fullTaskChart_' + safe, labels,
+      [{ label: 'Avg review time (min)', data: dataArr, color: css('--accent') }],
+      { fill: true }
+    );
   });
 
   // Expand button wiring
