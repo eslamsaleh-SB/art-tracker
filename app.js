@@ -314,6 +314,8 @@ function extraFilterSQL(prefix) {
   // Hard-coded exclusion — never show 'umbrella' app assignments.
   // IFNULL guard so rows w/ NULL app (not yet resynced) still pass.
   parts.push(`IFNULL(lower(${prefix}app), '') <> 'umbrella'`);
+  // Hard-coded floor — ignore anything before Jan 3, 2026.
+  parts.push(`${prefix}assignment_date >= '2026-01-03'`);
   if (STATE.team)        { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
   if (STATE.teamExclude) { parts.push(`${prefix}team <> ?${n++}`);         args.push(STATE.teamExclude); }
   if (STATE.reviewer)    { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
