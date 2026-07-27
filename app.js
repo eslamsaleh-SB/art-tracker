@@ -311,11 +311,14 @@ function extraFilterSQL(prefix) {
   const parts = [];
   const args  = [];
   let n = 4;
+  // Hard-coded exclusion — never show 'umbrella' app assignments.
+  // IFNULL guard so rows w/ NULL app (not yet resynced) still pass.
+  parts.push(`IFNULL(lower(${prefix}app), '') <> 'umbrella'`);
   if (STATE.team)        { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
   if (STATE.teamExclude) { parts.push(`${prefix}team <> ?${n++}`);         args.push(STATE.teamExclude); }
   if (STATE.reviewer)    { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
   if (STATE.code)        { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
-  return { sql: parts.length ? ' AND ' + parts.join(' AND ') : '', args };
+  return { sql: ' AND ' + parts.join(' AND '), args };
 }
 
 async function refresh() {
@@ -1054,7 +1057,7 @@ async function loadHours(R) {
 const IMPORT_CONFIG = {
   assignments: {
     // DB columns to write; source column looked up case+punct-insensitive
-    dbCols: ['match_id','code','task','half','side','reviewer_name','team','competition',
+    dbCols: ['match_id','app','code','task','half','side','reviewer_name','team','competition',
              'home_team','away_team','home_priority','away_priority','comp_priority',
              'match_date','sla','assignment_date','last_modified'],
     aliases: {},
