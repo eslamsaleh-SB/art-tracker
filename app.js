@@ -365,30 +365,36 @@ async function loadOverview(R) {
   `, [start, end, like, ...ef.args])).rows[0] || {};
 
   const overall = (await query(`
-    SELECT AVG(dl.actual_time_taken) AS avg_actual, COUNT(dl.matchid) AS log_rows
-    FROM data_logs dl
-    WHERE EXISTS (
-      SELECT 1 FROM assignments a
-      WHERE a.match_id = dl.matchid AND a.code = dl.code
-        AND a.assignment_date BETWEEN ?1 AND ?2
+    SELECT AVG(match_total) AS avg_actual, COUNT(*) AS matches
+    FROM (
+      SELECT a.match_id AS match_id, a.code AS code,
+             SUM(dl.actual_time_taken) AS match_total
+      FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
         ${efA.sql}
+      GROUP BY a.match_id, a.code
     )
   `, [start, end, like, ...efA.args])).rows[0] || {};
 
   const perTask = (await query(`
     SELECT task, avg_actual, samples FROM (
-      SELECT a.task AS task,
-             AVG(dl.actual_time_taken) AS avg_actual,
-             COUNT(dl.matchid) AS samples
-      FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-      WHERE a.assignment_date BETWEEN ?1 AND ?2
-        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
-        AND a.task IS NOT NULL AND a.task <> ''
-        ${efA.sql}
-      GROUP BY a.task
-      HAVING samples >= 5
+      SELECT task,
+        AVG(match_total) AS avg_actual,
+        COUNT(*) AS samples
+      FROM (
+        SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
+               SUM(dl.actual_time_taken) AS match_total
+        FROM assignments a
+        JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+        WHERE a.assignment_date BETWEEN ?1 AND ?2
+          AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
+          AND a.task IS NOT NULL AND a.task <> ''
+          ${efA.sql}
+        GROUP BY a.task, a.match_id, a.code
+      )
+      GROUP BY task HAVING samples >= 5
     )
     ORDER BY avg_actual ASC
   `, [start, end, like, ...efA.args])).rows;
@@ -401,7 +407,7 @@ async function loadOverview(R) {
     { label: 'Reviewers',         value: fmt(kpi.reviewers),         sub: 'active in range' },
     { label: 'Tasks',             value: fmt(kpi.tasks),             sub: 'assigned in range' },
     { label: 'Avg review time',   value: overall.avg_actual != null ? fmt(overall.avg_actual) + ' min' : '—',
-      sub: fmt(overall.log_rows) + ' log rows' },
+      sub: fmt(overall.matches) + ' matches counted' },
     { label: 'Fastest task',      value: fastest ? fastest.task : '—',
       sub: fastest ? fmt(fastest.avg_actual) + ' min avg · ' + fmt(fastest.samples) + ' logs' : '—' },
     { label: 'Slowest task',      value: slowest && slowest !== fastest ? slowest.task : '—',
@@ -448,14 +454,18 @@ async function loadTasks(R) {
   `, [start, end, like, ...ef.args])).rows;
 
   const avgRows = (await query(`
-    SELECT a.task AS task, AVG(dl.actual_time_taken) AS avg_actual
-    FROM assignments a
-    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-      AND a.task IS NOT NULL AND a.task <> ''
-      ${efA.sql}
-    GROUP BY a.task
+    SELECT task, AVG(match_total) AS avg_actual FROM (
+      SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
+             SUM(dl.actual_time_taken) AS match_total
+      FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+        AND a.task IS NOT NULL AND a.task <> ''
+        ${efA.sql}
+      GROUP BY a.task, a.match_id, a.code
+    )
+    GROUP BY task
   `, [start, end, like, ...efA.args])).rows;
   const avgByTask = {};
   avgRows.forEach(r => { avgByTask[r.task] = r.avg_actual; });
@@ -589,19 +599,25 @@ async function loadReviewers(R) {
     GROUP BY code, reviewer_name, team
   `, args)).rows;
 
-  // Avg/min/max time from data_logs
+  // Match-total based stats — SUM logs per (code, match_id) first, then
+  // AVG / MIN / MAX across those match totals. Avoids log-row bias.
   const stats = (await query(`
-    SELECT a.code AS code,
-      AVG(dl.actual_time_taken) AS avg_actual,
-      MIN(dl.actual_time_taken) AS min_actual,
-      MAX(dl.actual_time_taken) AS max_actual
-    FROM assignments a
-    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
-      ${efA.sql}
-      AND a.task = ${taskParam}
-    GROUP BY a.code
+    SELECT code,
+      AVG(match_total) AS avg_actual,
+      MIN(match_total) AS min_actual,
+      MAX(match_total) AS max_actual
+    FROM (
+      SELECT a.code AS code, a.match_id AS match_id,
+             SUM(dl.actual_time_taken) AS match_total
+      FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
+        ${efA.sql}
+        AND a.task = ${taskParam}
+      GROUP BY a.code, a.match_id
+    )
+    GROUP BY code
   `, args)).rows;
   const statsBy = {};
   stats.forEach(s => { statsBy[s.code] = s; });
