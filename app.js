@@ -83,6 +83,33 @@ function granExpr(col, gran) {
 }
 
 // ============================================================
+// SQL fragment: Half/Side rules per Apps Script
+//   half=1st          → only partid=1
+//   half=2nd          → only partid=2
+//   half=Both + side=Home/Away → all partids (incl. extras)
+//   half=Both + side=Both/blank → partid IN (1,2) only
+// Returns the actual_time_taken value ONLY when the log row's partid
+// counts under the assignment's Half/Side spec; else 0. Wrap in SUM()
+// grouped by (match_id, code, task, half, side) to get match total.
+// ============================================================
+function ruleActualExpr(aliasA, aliasDL) {
+  const A  = aliasA  ? aliasA  + '.' : '';
+  const DL = aliasDL ? aliasDL + '.' : '';
+  return `
+    CASE
+      WHEN lower(IFNULL(${A}half, '')) = '1st' THEN
+        CASE WHEN ${DL}partid = '1' THEN ${DL}actual_time_taken ELSE 0 END
+      WHEN lower(IFNULL(${A}half, '')) = '2nd' THEN
+        CASE WHEN ${DL}partid = '2' THEN ${DL}actual_time_taken ELSE 0 END
+      WHEN lower(IFNULL(${A}side, '')) IN ('home', 'away') THEN
+        ${DL}actual_time_taken
+      ELSE
+        CASE WHEN ${DL}partid IN ('1', '2') THEN ${DL}actual_time_taken ELSE 0 END
+    END
+  `;
+}
+
+// ============================================================
 // State
 // ============================================================
 const STATE = {
@@ -368,13 +395,13 @@ async function loadOverview(R) {
     SELECT AVG(match_total) AS avg_actual, COUNT(*) AS matches
     FROM (
       SELECT a.match_id AS match_id, a.code AS code,
-             SUM(dl.actual_time_taken) AS match_total
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM assignments a
       JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
         ${efA.sql}
-      GROUP BY a.match_id, a.code
+      GROUP BY a.match_id, a.code, a.half, a.side
     )
   `, [start, end, like, ...efA.args])).rows[0] || {};
 
@@ -385,14 +412,14 @@ async function loadOverview(R) {
         COUNT(*) AS samples
       FROM (
         SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
-               SUM(dl.actual_time_taken) AS match_total
+               SUM(${ruleActualExpr('a','dl')}) AS match_total
         FROM assignments a
         JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
         WHERE a.assignment_date BETWEEN ?1 AND ?2
           AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
           AND a.task IS NOT NULL AND a.task <> ''
           ${efA.sql}
-        GROUP BY a.task, a.match_id, a.code
+        GROUP BY a.task, a.match_id, a.code, a.half, a.side
       )
       GROUP BY task HAVING samples >= 5
     )
@@ -456,14 +483,14 @@ async function loadTasks(R) {
   const avgRows = (await query(`
     SELECT task, AVG(match_total) AS avg_actual FROM (
       SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
-             SUM(dl.actual_time_taken) AS match_total
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM assignments a
       JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
         AND a.task IS NOT NULL AND a.task <> ''
         ${efA.sql}
-      GROUP BY a.task, a.match_id, a.code
+      GROUP BY a.task, a.match_id, a.code, a.half, a.side
     )
     GROUP BY task
   `, [start, end, like, ...efA.args])).rows;
@@ -521,14 +548,14 @@ async function loadTasks(R) {
     FROM (
       SELECT a.task AS task, ${gexpr} AS bucket,
              a.match_id AS match_id, a.code AS code,
-             SUM(dl.actual_time_taken) AS match_total
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM assignments a
       JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
         AND a.task IS NOT NULL AND a.task <> ''
         ${efA.sql}
-      GROUP BY a.task, bucket, a.match_id, a.code
+      GROUP BY a.task, bucket, a.match_id, a.code, a.half, a.side
     )
     GROUP BY task, bucket
     ORDER BY task, bucket
@@ -623,14 +650,14 @@ async function loadReviewers(R) {
       MAX(match_total) AS max_actual
     FROM (
       SELECT a.code AS code, a.match_id AS match_id,
-             SUM(dl.actual_time_taken) AS match_total
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM assignments a
       JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
         ${efA.sql}
         AND a.task = ${taskParam}
-      GROUP BY a.code, a.match_id
+      GROUP BY a.code, a.match_id, a.half, a.side
     )
     GROUP BY code
   `, args)).rows;
@@ -690,13 +717,15 @@ async function loadRows(R) {
   const start = R.start, end = R.end;
   const ef = extraFilterSQL('');
 
-  // Assignments in range
+  // Assignments in range, capped at the latest review_started in the logs
+  // (i.e. hide future assignments that couldn't yet have been reviewed).
   const arows = (await query(`
     SELECT match_id, assignment_date, competition, home_team, away_team,
            code, reviewer_name, team, task, half, side
     FROM assignments
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
+      AND assignment_date <= (SELECT substr(MAX(review_started), 1, 10) FROM data_logs)
       ${ef.sql}
     ORDER BY assignment_date DESC, match_id DESC
     LIMIT 500
