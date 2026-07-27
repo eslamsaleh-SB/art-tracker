@@ -1151,13 +1151,17 @@ async function runImport() {
   const BATCH = 500;
   let pushed = 0, failed = 0;
   const t0 = performance.now();
+  const importTs = new Date().toISOString();
   for (let i = 0; i < rows.length; i += BATCH) {
     const slice = rows.slice(i, i + BATCH);
     const statements = slice.map(row => ({
       sql,
       args: cfg.dbCols.map(c => {
         const j = mapping[c];
-        return (j != null && j < row.length) ? row[j] : '';
+        if (j != null && j < row.length) return row[j];
+        // Auto-fill certain columns when CSV doesn't provide them
+        if (c === 'last_modified') return importTs;
+        return '';
       }),
     }));
     try {
