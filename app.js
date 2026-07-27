@@ -94,12 +94,16 @@ const STATE = {
   taskGran: 'month',
   q: '',
   team: '',
+  teamExclude: '',
   reviewer: '',
   code: '',
   selectedTask: '',
   revTopN: 20,
   revShowAll: false,
+  hoursGran: 'week',   // 'day' | 'week'
   filtersLoaded: false,
+  sortState: {},       // { tblId: { key, dir } }
+  lastRows: {},        // { tblId: [rows] } — for CSV export
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -170,12 +174,40 @@ function line(canvasId, labels, datasets, opts = {}) {
 function renderTable(tblId, cols, rows) {
   const tbl = document.getElementById(tblId);
   if (!tbl) return;
-  const head = '<thead><tr>' + cols.map(c => `<th class="${c.num?'num':''}">${esc(c.label)}</th>`).join('') + '</tr></thead>';
-  if (!rows || !rows.length) {
+
+  // Persist the row set + cols for CSV export
+  STATE.lastRows[tblId] = { cols, rows: rows || [] };
+
+  // Apply saved sort
+  const s = STATE.sortState[tblId];
+  let sortedRows = (rows || []).slice();
+  if (s && s.key) {
+    const col = cols.find(c => c.key === s.key);
+    sortedRows.sort((a, b) => {
+      const va = a[s.key], vb = b[s.key];
+      const na = (va == null || va === ''), nb = (vb == null || vb === '');
+      if (na && nb) return 0;
+      if (na) return 1;
+      if (nb) return -1;
+      if (typeof va === 'number' && typeof vb === 'number') return s.dir === 'asc' ? va - vb : vb - va;
+      const sa = String(va), sb = String(vb);
+      return s.dir === 'asc' ? sa.localeCompare(sb, undefined, { numeric: true }) : sb.localeCompare(sa, undefined, { numeric: true });
+    });
+  }
+
+  const head = '<thead><tr>' + cols.map(c => {
+    const sortCls = s && s.key === c.key ? (s.dir === 'asc' ? 'sort-asc' : 'sort-desc') : '';
+    const cls = [c.num ? 'num' : '', c.noSort ? '' : 'sortable', sortCls].filter(Boolean).join(' ');
+    return `<th class="${cls}" data-sort-key="${esc(c.key)}">${esc(c.label)}</th>`;
+  }).join('') + '</tr></thead>';
+
+  if (!sortedRows.length) {
     tbl.innerHTML = head + `<tbody><tr><td colspan="${cols.length}" class="empty">No data in this range.</td></tr></tbody>`;
+    wireSortHeaders(tbl, tblId);
     return;
   }
-  const body = '<tbody>' + rows.map(r =>
+
+  const body = '<tbody>' + sortedRows.map(r =>
     '<tr>' + cols.map(c => {
       let v = r[c.key];
       if (c.render) {
@@ -190,6 +222,49 @@ function renderTable(tblId, cols, rows) {
     }).join('') + '</tr>'
   ).join('') + '</tbody>';
   tbl.innerHTML = head + body;
+  wireSortHeaders(tbl, tblId);
+}
+function wireSortHeaders(tbl, tblId) {
+  tbl.querySelectorAll('th.sortable').forEach(th => {
+    th.onclick = () => {
+      const key = th.dataset.sortKey;
+      const cur = STATE.sortState[tblId];
+      const dir = (cur && cur.key === key && cur.dir === 'asc') ? 'desc' : 'asc';
+      STATE.sortState[tblId] = { key, dir };
+      const saved = STATE.lastRows[tblId];
+      if (saved) renderTable(tblId, saved.cols, saved.rows);
+    };
+  });
+}
+
+// CSV export from saved table state
+function exportTableCsv(tblId) {
+  const saved = STATE.lastRows[tblId];
+  if (!saved) return;
+  const { cols, rows } = saved;
+  const escape = v => {
+    if (v == null) return '';
+    const s = String(v).replace(/"/g, '""');
+    return /[",\n]/.test(s) ? `"${s}"` : s;
+  };
+  const header = cols.map(c => escape(c.label)).join(',');
+  const body = rows.map(r => cols.map(c => {
+    let v = r[c.key];
+    if (c.render && !c.raw) {
+      // Render may return HTML — strip tags for CSV
+      const html = c.render(r);
+      v = String(html || '').replace(/<[^>]+>/g, '');
+    } else if (typeof v === 'number') {
+      v = round1(v);
+    }
+    return escape(v);
+  }).join(',')).join('\n');
+  const blob = new Blob([header + '\n' + body], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = tblId + '_' + new Date().toISOString().slice(0,10) + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ============================================================
@@ -200,8 +275,10 @@ function setView(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + name));
   document.getElementById('pageTitle').textContent = {
-    overview: 'Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer', rows: 'Assignments',
-  }[name];
+    overview: 'Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer',
+    rows: 'Assignments', nologs: 'No Logs', partial: 'Partial Coverage',
+    hours: 'Reviewer hours', import: 'Import CSV',
+  }[name] || name;
   refresh();
 }
 
@@ -213,9 +290,10 @@ async function loadFilters() {
     query(`SELECT DISTINCT reviewer_name FROM assignments WHERE reviewer_name IS NOT NULL AND reviewer_name <> '' ORDER BY reviewer_name`),
     query(`SELECT DISTINCT code FROM assignments WHERE code IS NOT NULL AND code <> '' ORDER BY code`),
   ]);
-  fillSel('fTeam',     'All teams',     teams.rows.map(r => r.team));
-  fillSel('fReviewer', 'All reviewers', revs.rows.map(r => r.reviewer_name));
-  fillSel('fCode',     'All codes',     codes.rows.map(r => r.code));
+  fillSel('fTeam',        'All teams',     teams.rows.map(r => r.team));
+  fillSel('fTeamExclude', 'Exclude team…', teams.rows.map(r => r.team));
+  fillSel('fReviewer',    'All reviewers', revs.rows.map(r => r.reviewer_name));
+  fillSel('fCode',        'All codes',     codes.rows.map(r => r.code));
   STATE.filtersLoaded = true;
 }
 function fillSel(id, allLabel, options) {
@@ -233,9 +311,10 @@ function extraFilterSQL(prefix) {
   const parts = [];
   const args  = [];
   let n = 4;
-  if (STATE.team)     { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
-  if (STATE.reviewer) { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
-  if (STATE.code)     { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
+  if (STATE.team)        { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
+  if (STATE.teamExclude) { parts.push(`${prefix}team <> ?${n++}`);         args.push(STATE.teamExclude); }
+  if (STATE.reviewer)    { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
+  if (STATE.code)        { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
   return { sql: parts.length ? ' AND ' + parts.join(' AND ') : '', args };
 }
 
@@ -250,6 +329,9 @@ async function refresh() {
     if (STATE.view === 'tasks')     await loadTasks(R);
     if (STATE.view === 'reviewers') await loadReviewers(R);
     if (STATE.view === 'rows')      await loadRows(R);
+    if (STATE.view === 'nologs')    await loadNoLogs(R);
+    if (STATE.view === 'partial')   await loadPartial(R);
+    if (STATE.view === 'hours')     await loadHours(R);
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {
@@ -777,8 +859,24 @@ if (qEl) {
 document.getElementById('reloadBtn').addEventListener('click', refresh);
 
 document.getElementById('fTeam').addEventListener('change', e => { STATE.team = e.target.value; refresh(); });
+document.getElementById('fTeamExclude').addEventListener('change', e => { STATE.teamExclude = e.target.value; refresh(); });
 document.getElementById('fReviewer').addEventListener('change', e => { STATE.reviewer = e.target.value; refresh(); });
 document.getElementById('fCode').addEventListener('change', e => { STATE.code = e.target.value; refresh(); });
+
+// Hours granularity switch
+const hoursSeg = document.getElementById('hoursGranSeg');
+if (hoursSeg) hoursSeg.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  STATE.hoursGran = b.dataset.hg;
+  hoursSeg.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+  if (STATE.view === 'hours') refresh();
+});
+
+// CSV Export buttons — one delegated handler for every `data-export` attr
+document.body.addEventListener('click', e => {
+  const btn = e.target.closest('[data-export]');
+  if (btn) exportTableCsv(btn.dataset.export);
+});
 
 document.getElementById('revTaskSel').addEventListener('change', e => {
   STATE.selectedTask = e.target.value;
@@ -813,6 +911,142 @@ try {
   const saved = localStorage.getItem('art_theme');
   if (saved) document.documentElement.setAttribute('data-theme', saved);
 } catch(_) {}
+
+// ============================================================
+// No Logs view — assignments w/ NO data_logs, BUT only where
+// assignment_date <= max(review_started) in logs (i.e. work was
+// expected by now). Recent unlogged assignments hidden.
+// ============================================================
+async function loadNoLogs(R) {
+  const start = R.start, end = R.end;
+  const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const ef = extraFilterSQL('a.');
+  const { rows } = await query(`
+    WITH cutoff AS (
+      SELECT substr(MAX(review_started), 1, 10) AS max_review FROM data_logs
+    )
+    SELECT a.match_id, a.assignment_date, a.competition, a.home_team, a.away_team,
+           a.task, a.half, a.side, a.code, a.reviewer_name, a.team
+    FROM assignments a
+    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE dl.matchid IS NULL
+      AND a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+      AND a.assignment_date <= (SELECT max_review FROM cutoff)
+      ${ef.sql}
+    GROUP BY a.match_id, a.code, a.task, a.half, a.side
+    ORDER BY a.assignment_date DESC
+    LIMIT 2000
+  `, [start, end, like, ...ef.args]);
+  document.getElementById('nologsCount').textContent = rows.length + ' rows';
+  renderTable('tblNoLogs', [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
+    { key:'competition',     label:'Competition' },
+    { key:'home_team',       label:'Home' },
+    { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'half',            label:'Half' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+  ], rows);
+}
+
+// ============================================================
+// Partial Coverage — half=Both assignments where only one partid
+// (1 or 2) has logs.
+// ============================================================
+async function loadPartial(R) {
+  const start = R.start, end = R.end;
+  const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const ef = extraFilterSQL('a.');
+  const { rows } = await query(`
+    SELECT a.match_id, a.assignment_date, a.competition, a.home_team, a.away_team,
+           a.task, a.half, a.side, a.code, a.reviewer_name, a.team,
+           SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) AS logs_1st,
+           SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) AS logs_2nd,
+           CASE
+             WHEN SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) > 0
+              AND SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) = 0
+             THEN 'Missing 2nd'
+             WHEN SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) = 0
+              AND SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) > 0
+             THEN 'Missing 1st'
+             ELSE 'ok'
+           END AS missing
+    FROM assignments a
+    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+      AND lower(a.half) = 'both'
+      ${ef.sql}
+    GROUP BY a.match_id, a.code, a.task, a.half, a.side
+    HAVING (logs_1st > 0 AND logs_2nd = 0) OR (logs_1st = 0 AND logs_2nd > 0)
+    ORDER BY a.assignment_date DESC
+    LIMIT 2000
+  `, [start, end, like, ...ef.args]);
+  document.getElementById('partialCount').textContent = rows.length + ' rows';
+  renderTable('tblPartial', [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
+    { key:'competition',     label:'Competition' },
+    { key:'home_team',       label:'Home' },
+    { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+    { key:'missing',         label:'Missing half' },
+    { key:'logs_1st',        label:'Logs 1st', num:true },
+    { key:'logs_2nd',        label:'Logs 2nd', num:true },
+  ], rows);
+}
+
+// ============================================================
+// Hours — per reviewer, per day or per week
+// ============================================================
+async function loadHours(R) {
+  const start = R.start, end = R.end;
+  const like = STATE.q ? '%' + STATE.q + '%' : '';
+  const ef = extraFilterSQL('a.');
+
+  const bucketExpr = STATE.hoursGran === 'day'
+    ? `substr(dl.review_started, 1, 10)`
+    : `date(dl.review_started, 'weekday 0', '-7 days')`;   // Sunday start
+
+  // JOIN data_logs to assignments to inherit team/reviewer filters
+  const { rows } = await query(`
+    SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
+           ${bucketExpr} AS bucket,
+           SUM(dl.actual_time_taken)  AS actual,
+           SUM(dl.total_break_time)   AS break_time,
+           SUM(dl.total_time_taken)   AS total,
+           COUNT(DISTINCT a.match_id) AS matches
+    FROM assignments a
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+      ${ef.sql}
+    GROUP BY a.code, a.reviewer_name, a.team, bucket
+    ORDER BY bucket DESC, actual DESC
+    LIMIT 5000
+  `, [start, end, like, ...ef.args]);
+
+  document.getElementById('hoursCount').textContent = rows.length + ' rows';
+  renderTable('tblHours', [
+    { key:'bucket',         label: STATE.hoursGran === 'day' ? 'Day' : 'Week (Sun)' },
+    { key:'code',           label:'Code' },
+    { key:'reviewer_name',  label:'Reviewer' },
+    { key:'team',           label:'Team' },
+    { key:'matches',        label:'Matches',           num:true },
+    { key:'actual',         label:'Actual (min)',      num:true },
+    { key:'break_time',     label:'Break (min)',       num:true },
+    { key:'total',          label:'Total (min)',       num:true },
+  ], rows);
+}
 
 // ============================================================
 // CSV Import
