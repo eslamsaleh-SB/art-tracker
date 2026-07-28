@@ -201,6 +201,8 @@
   }
   .chip-accent { background: rgba(59,130,246,0.15); color: var(--accent); }
 
+  select[multiple] { min-width: 140px; max-width: 200px; height: 34px; padding: 4px 8px; }
+  select[multiple]:focus { height: 140px; z-index: 5; position: relative; }
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover { color: var(--text); }
   th.sortable::after { content: ' ⇅'; opacity: 0.4; font-size: 10px; }
@@ -261,8 +263,9 @@
       <div class="page-sub" id="pageSub">—</div>
     </div>
     <div class="filters">
-      <select id="fTeam" class="select"><option value="">All teams</option></select>
-      <select id="fTeamExclude" class="select" title="Exclude a team"><option value="">Exclude team…</option></select>
+      <select id="fTaskGlobal" class="select" title="Filter by task"><option value="">All tasks</option></select>
+      <select id="fTeam" class="select" multiple size="1" title="Teams to include (ctrl-click for multiple)"></select>
+      <select id="fTeamExclude" class="select" multiple size="1" title="Teams to exclude (ctrl-click for multiple)"></select>
       <select id="fReviewer" class="select"><option value="">All reviewers</option></select>
       <select id="fCode" class="select"><option value="">All codes</option></select>
       <div class="segment" id="rangeSeg">

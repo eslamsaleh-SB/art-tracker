@@ -120,11 +120,12 @@ const STATE = {
   gran: 'month',
   taskGran: 'month',
   q: '',
-  team: '',
-  teamExclude: '',
+  teams: [],           // multi-select include
+  teamsExclude: [],    // multi-select exclude
   reviewer: '',
   code: '',
-  selectedTask: '',
+  taskFilter: '',      // global task filter (used everywhere)
+  selectedTask: '',    // still used inside By Reviewer view (synced w/ taskFilter)
   revTopN: 20,
   revShowAll: false,
   hoursGran: 'week',   // 'day' | 'week'
@@ -317,10 +318,16 @@ async function loadFilters() {
     query(`SELECT DISTINCT reviewer_name FROM assignments WHERE reviewer_name IS NOT NULL AND reviewer_name <> '' ORDER BY reviewer_name`),
     query(`SELECT DISTINCT code FROM assignments WHERE code IS NOT NULL AND code <> '' ORDER BY code`),
   ]);
-  fillSel('fTeam',        'All teams',     teams.rows.map(r => r.team));
-  fillSel('fTeamExclude', 'Exclude team…', teams.rows.map(r => r.team));
-  fillSel('fReviewer',    'All reviewers', revs.rows.map(r => r.reviewer_name));
-  fillSel('fCode',        'All codes',     codes.rows.map(r => r.code));
+  fillMulti('fTeam',        teams.rows.map(r => r.team));
+  fillMulti('fTeamExclude', teams.rows.map(r => r.team));
+  fillSel('fReviewer',      'All reviewers', revs.rows.map(r => r.reviewer_name));
+  fillSel('fCode',          'All codes',     codes.rows.map(r => r.code));
+  // Global Task dropdown (single select)
+  const tasks = (await query(`
+    SELECT DISTINCT task FROM assignments
+    WHERE task IS NOT NULL AND task <> '' ORDER BY task
+  `)).rows.map(r => r.task);
+  fillSel('fTaskGlobal', 'All tasks', tasks);
   STATE.filtersLoaded = true;
 }
 function fillSel(id, allLabel, options) {
@@ -330,23 +337,42 @@ function fillSel(id, allLabel, options) {
     options.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
   sel.value = cur;
 }
+function fillMulti(id, options) {
+  const sel = document.getElementById(id);
+  const chosen = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+  sel.innerHTML = options.map(v =>
+    `<option value="${esc(v)}"${chosen.has(v) ? ' selected' : ''}>${esc(v)}</option>`
+  ).join('');
+  // Placeholder-like: show a hint via title / update label separately
+  sel.title = id === 'fTeam' ? 'Include teams (ctrl-click for multiple)'
+                              : 'Exclude teams (ctrl-click for multiple)';
+}
 
 // Build the shared WHERE clause + args starting at position 4
 // (positions 1-3 already used: start, end, q-like)
 function extraFilterSQL(prefix) {
-  // prefix = 'a.' for JOINed queries, '' for direct
   const parts = [];
   const args  = [];
   let n = 4;
-  // Hard-coded exclusion — never show 'umbrella' app assignments.
-  // IFNULL guard so rows w/ NULL app (not yet resynced) still pass.
+  // Hard-coded: never show umbrella app rows or pre-Jan-3 rows.
   parts.push(`IFNULL(lower(${prefix}app), '') <> 'umbrella'`);
-  // Hard-coded floor — ignore anything before Jan 3, 2026.
   parts.push(`${prefix}assignment_date >= '2026-01-03'`);
-  if (STATE.team)        { parts.push(`${prefix}team = ?${n++}`);          args.push(STATE.team); }
-  if (STATE.teamExclude) { parts.push(`${prefix}team <> ?${n++}`);         args.push(STATE.teamExclude); }
-  if (STATE.reviewer)    { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
-  if (STATE.code)        { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
+  // Multi-select include teams
+  if (STATE.teams && STATE.teams.length) {
+    const ph = STATE.teams.map(() => '?' + (n++)).join(',');
+    parts.push(`${prefix}team IN (${ph})`);
+    args.push(...STATE.teams);
+  }
+  // Multi-select exclude teams
+  if (STATE.teamsExclude && STATE.teamsExclude.length) {
+    const ph = STATE.teamsExclude.map(() => '?' + (n++)).join(',');
+    parts.push(`${prefix}team NOT IN (${ph})`);
+    args.push(...STATE.teamsExclude);
+  }
+  if (STATE.reviewer)   { parts.push(`${prefix}reviewer_name = ?${n++}`); args.push(STATE.reviewer); }
+  if (STATE.code)       { parts.push(`${prefix}code = ?${n++}`);          args.push(STATE.code); }
+  // Global task filter
+  if (STATE.taskFilter) { parts.push(`${prefix}task = ?${n++}`);          args.push(STATE.taskFilter); }
   return { sql: ' AND ' + parts.join(' AND '), args };
 }
 
@@ -923,10 +949,23 @@ if (qEl) {
 }
 document.getElementById('reloadBtn').addEventListener('click', refresh);
 
-document.getElementById('fTeam').addEventListener('change', e => { STATE.team = e.target.value; refresh(); });
-document.getElementById('fTeamExclude').addEventListener('change', e => { STATE.teamExclude = e.target.value; refresh(); });
+document.getElementById('fTeam').addEventListener('change', e => {
+  STATE.teams = Array.from(e.target.selectedOptions).map(o => o.value).filter(Boolean);
+  refresh();
+});
+document.getElementById('fTeamExclude').addEventListener('change', e => {
+  STATE.teamsExclude = Array.from(e.target.selectedOptions).map(o => o.value).filter(Boolean);
+  refresh();
+});
 document.getElementById('fReviewer').addEventListener('change', e => { STATE.reviewer = e.target.value; refresh(); });
 document.getElementById('fCode').addEventListener('change', e => { STATE.code = e.target.value; refresh(); });
+document.getElementById('fTaskGlobal').addEventListener('change', e => {
+  STATE.taskFilter = e.target.value;
+  STATE.selectedTask = e.target.value;  // sync Reviewer view
+  const revSel = document.getElementById('revTaskSel');
+  if (revSel && e.target.value) revSel.value = e.target.value;
+  refresh();
+});
 
 // Hours granularity switch
 const hoursSeg = document.getElementById('hoursGranSeg');
