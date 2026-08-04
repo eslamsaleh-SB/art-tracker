@@ -45,7 +45,10 @@ function fmt(n) {
 function presetRange(preset) {
   const now = new Date();
   const iso = d => d.toISOString().slice(0,10);
-  const end = iso(now);
+  // End = today PLUS 1 day so we're inclusive of ISO-timestamped rows
+  // like '2026-07-27T00:00:00' (which is > '2026-07-27' lexicographically).
+  const endDate = new Date(now); endDate.setDate(endDate.getDate() + 1);
+  const end = iso(endDate);
   const d = new Date(now);
   if (preset === '30d') { d.setDate(now.getDate() - 30); return { start: iso(d), end }; }
   if (preset === '3m')  { d.setMonth(now.getMonth() - 3); return { start: iso(d), end }; }
@@ -126,6 +129,9 @@ const STATE = {
   atMode: '',          // Actual Time filter: '' | 'lt' | 'between'
   atMin: null,
   atMax: null,
+  rowsPage: 1,
+  rowsPerPage: 500,
+  rowsTotal: 0,
   code: '',
   taskFilter: '',      // global task filter (used everywhere)
   selectedTask: '',    // still used inside By Reviewer view (synced w/ taskFilter)
@@ -399,7 +405,9 @@ function extraFilterSQL(prefix) {
   return { sql: ' AND ' + parts.join(' AND '), args };
 }
 
-async function refresh() {
+async function refresh(opts) {
+  opts = opts || {};
+  if (!opts.keepPage) STATE.rowsPage = 1;
   const R = currentRange();
   const label = rangeLabel(STATE.range, R.start, R.end);
   document.getElementById('pageSub').textContent = 'Loading ' + label + '…';
@@ -774,18 +782,32 @@ async function loadRows(R) {
   const start = R.start, end = R.end;
   const ef = extraFilterSQL('');
 
-  // Assignments in range, capped at the latest review_started in the logs
-  // (i.e. hide future assignments that couldn't yet have been reviewed).
-  const arows = (await query(`
-    SELECT match_id, assignment_date, competition, home_team, away_team,
-           code, reviewer_name, team, task, half, side
-    FROM assignments
+  // Assignments in range, capped at the latest review_started in the logs.
+  // Also do a COUNT(*) to drive pagination.
+  const commonWhere = `
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
       AND assignment_date <= (SELECT substr(MAX(review_started), 1, 10) FROM data_logs)
       ${ef.sql}
+  `;
+  const totalRow = (await query(
+    `SELECT COUNT(*) AS c FROM assignments ${commonWhere}`,
+    [start, end, like, ...ef.args]
+  )).rows[0] || { c: 0 };
+  STATE.rowsTotal = totalRow.c;
+
+  const perPage = STATE.rowsPerPage;
+  const totalPages = Math.max(1, Math.ceil(STATE.rowsTotal / perPage));
+  if (STATE.rowsPage > totalPages) STATE.rowsPage = 1;
+  const offset = (STATE.rowsPage - 1) * perPage;
+
+  const arows = (await query(`
+    SELECT match_id, assignment_date, competition, home_team, away_team,
+           code, reviewer_name, team, task, half, side
+    FROM assignments
+    ${commonWhere}
     ORDER BY assignment_date DESC, match_id DESC
-    LIMIT 500
+    LIMIT ${perPage} OFFSET ${offset}
   `, [start, end, like, ...ef.args])).rows;
 
   if (!arows.length) {
@@ -944,6 +966,53 @@ async function loadRows(R) {
     },
     { key:'notes', label:'Notes' },
   ], filtered);
+
+  renderPager(totalPages);
+}
+
+// Pager for the Assignments table
+function renderPager(totalPages) {
+  const info = document.getElementById('rowsPagerInfo');
+  const nav  = document.getElementById('rowsPagerNav');
+  if (!info || !nav) return;
+  const per = STATE.rowsPerPage;
+  const p   = STATE.rowsPage;
+  const total = STATE.rowsTotal;
+  const from = total === 0 ? 0 : (p - 1) * per + 1;
+  const to   = Math.min(p * per, total);
+  info.textContent = total === 0
+    ? 'no rows'
+    : `Showing ${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`;
+
+  if (totalPages <= 1) { nav.innerHTML = ''; return; }
+
+  const pages = [];
+  const window = 2;
+  const push = n => pages.push(n);
+  push(1);
+  if (p - window > 2) pages.push('…');
+  for (let i = Math.max(2, p - window); i <= Math.min(totalPages - 1, p + window); i++) push(i);
+  if (p + window < totalPages - 1) pages.push('…');
+  if (totalPages > 1) push(totalPages);
+
+  nav.innerHTML =
+    `<button ${p === 1 ? 'disabled' : ''} data-page="${p - 1}">‹ Prev</button>` +
+    pages.map(n =>
+      n === '…' ? `<span class="num" style="cursor:default;">…</span>`
+                : `<span class="num${n === p ? ' active' : ''}" data-page="${n}">${n}</span>`
+    ).join('') +
+    `<button ${p === totalPages ? 'disabled' : ''} data-page="${p + 1}">Next ›</button>`;
+
+  nav.querySelectorAll('[data-page]').forEach(el => {
+    el.addEventListener('click', () => {
+      const n = parseInt(el.dataset.page, 10);
+      if (isNaN(n) || n < 1 || n > totalPages) return;
+      STATE.rowsPage = n;
+      refresh({ keepPage: true });
+      const wrap = document.querySelector('#tab-rows .table-wrap');
+      if (wrap) wrap.scrollTop = 0;
+    });
+  });
 }
 
 // ============================================================

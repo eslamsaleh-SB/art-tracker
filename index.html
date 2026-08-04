@@ -186,6 +186,12 @@
 
   /* --- Tables --- */
   .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--card); max-height: 460px; }
+  #tab-rows .table-wrap { max-height: calc(100vh - 260px); }
+  .pager { display: inline-flex; gap: 4px; align-items: center; }
+  .pager button { padding: 4px 10px; border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 6px; cursor: pointer; font-family: inherit; }
+  .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pager .num { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; }
+  .pager .num.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th, td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
   th { background: var(--bg-elev); color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; position: sticky; top: 0; z-index: 1; }
@@ -490,6 +496,10 @@
         </div>
       </div>
       <div class="table-wrap"><table id="tblRows"></table></div>
+      <div id="rowsPager" style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div class="panel-sub" id="rowsPagerInfo"></div>
+        <div class="pager" id="rowsPagerNav"></div>
+      </div>
     </div>
   </section>
 
