@@ -120,9 +120,12 @@ const STATE = {
   gran: 'month',
   taskGran: 'month',
   q: '',
-  teams: [],           // multi-select include
-  teamsExclude: [],    // multi-select exclude
+  teams: [],           // multi-select include (empty = all)
+  teamsExclude: [],    // deprecated — kept for backward compat, always empty now
   reviewer: '',
+  atMode: '',          // Actual Time filter: '' | 'lt' | 'between'
+  atMin: null,
+  atMax: null,
   code: '',
   taskFilter: '',      // global task filter (used everywhere)
   selectedTask: '',    // still used inside By Reviewer view (synced w/ taskFilter)
@@ -318,8 +321,7 @@ async function loadFilters() {
     query(`SELECT DISTINCT reviewer_name FROM assignments WHERE reviewer_name IS NOT NULL AND reviewer_name <> '' ORDER BY reviewer_name`),
     query(`SELECT DISTINCT code FROM assignments WHERE code IS NOT NULL AND code <> '' ORDER BY code`),
   ]);
-  fillMulti('fTeam',        teams.rows.map(r => r.team));
-  fillMulti('fTeamExclude', teams.rows.map(r => r.team));
+  fillTeamCheckboxes(teams.rows.map(r => r.team));
   fillSel('fReviewer',      'All reviewers', revs.rows.map(r => r.reviewer_name));
   fillSel('fCode',          'All codes',     codes.rows.map(r => r.code));
   // Global Task dropdown (single select)
@@ -337,15 +339,36 @@ function fillSel(id, allLabel, options) {
     options.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
   sel.value = cur;
 }
-function fillMulti(id, options) {
-  const sel = document.getElementById(id);
-  const chosen = new Set(Array.from(sel.selectedOptions).map(o => o.value));
-  sel.innerHTML = options.map(v =>
-    `<option value="${esc(v)}"${chosen.has(v) ? ' selected' : ''}>${esc(v)}</option>`
-  ).join('');
-  // Placeholder-like: show a hint via title / update label separately
-  sel.title = id === 'fTeam' ? 'Include teams (ctrl-click for multiple)'
-                              : 'Exclude teams (ctrl-click for multiple)';
+// Team filter — checkbox popup (replaces the two multi-selects)
+function fillTeamCheckboxes(teamsList) {
+  const container = document.getElementById('teamCheckboxes');
+  if (!container) return;
+  container.dataset.teams = JSON.stringify(teamsList);
+  const chosen = new Set(STATE.teams || []);
+  container.innerHTML = teamsList.map(t => `
+    <label style="display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;">
+      <input type="checkbox" class="teamOpt" value="${esc(t)}"${chosen.has(t) ? ' checked' : ''}>
+      <span>${esc(t)}</span>
+    </label>
+  `).join('');
+  updateTeamButton();
+}
+function updateTeamButton() {
+  const btn = document.getElementById('teamFilterBtn');
+  if (!btn) return;
+  const n = (STATE.teams || []).length;
+  btn.textContent = n === 0 ? 'All teams' : (n === 1 ? STATE.teams[0] : n + ' teams selected');
+}
+
+// Format minutes as "1h 23m" (or "45m" if <60, or "12h" if exact hour)
+function minToHM(min) {
+  if (min == null || isNaN(min)) return '';
+  const total = Math.round(Number(min));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h === 0) return m + 'm';
+  if (m === 0) return h + 'h';
+  return h + 'h ' + m + 'm';
 }
 
 // Build the shared WHERE clause + args starting at position 4
@@ -654,9 +677,17 @@ async function loadReviewers(R) {
   const args = [start, end, like, ...efA.args, task];
   const taskParam = '?' + (4 + efA.args.length);
 
-  // Counts per reviewer (no JOIN inflation)
+  // Counts per reviewer — GROUP BY code only. If a code has multiple teams
+  // or reviewer_name variants in the source, collapse them here so the row
+  // appears once. GROUP_CONCAT gives all distinct values.
   const counts = (await query(`
-    SELECT code, reviewer_name, team,
+    SELECT code,
+      COALESCE((SELECT reviewer_name FROM assignments WHERE code = a.code
+                 AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                 GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1),
+               MAX(reviewer_name)) AS reviewer_name,
+      (SELECT GROUP_CONCAT(DISTINCT team) FROM assignments WHERE code = a.code
+         AND team IS NOT NULL AND team <> '') AS team,
       COUNT(*) AS matches_listed,
       COUNT(DISTINCT match_id) AS distinct_matches
     FROM assignments a
@@ -664,7 +695,7 @@ async function loadReviewers(R) {
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
       ${efA.sql}
       AND a.task = ${taskParam}
-    GROUP BY code, reviewer_name, team
+    GROUP BY code
   `, args)).rows;
 
   // Match-total based stats — SUM logs per (code, match_id) first, then
@@ -876,7 +907,17 @@ async function loadRows(R) {
     };
   });
 
-  document.getElementById('rowsCount').textContent = enriched.length + ' rows (max 500)';
+  // Post-JS Actual Time filter (applied on the computed actual value)
+  let filtered = enriched;
+  if (STATE.atMode === 'lt' && STATE.atMin != null) {
+    filtered = filtered.filter(r => r.actual != null && r.actual < STATE.atMin);
+  } else if (STATE.atMode === 'between' && STATE.atMin != null && STATE.atMax != null) {
+    filtered = filtered.filter(r =>
+      r.actual != null && r.actual >= STATE.atMin && r.actual <= STATE.atMax);
+  }
+
+  document.getElementById('rowsCount').textContent =
+    filtered.length + ' rows' + (filtered.length !== enriched.length ? ' (of ' + enriched.length + ')' : '');
   renderTable('tblRows', [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned' },
@@ -902,7 +943,7 @@ async function loadRows(R) {
       },
     },
     { key:'notes', label:'Notes' },
-  ], enriched);
+  ], filtered);
 }
 
 // ============================================================
@@ -949,14 +990,35 @@ if (qEl) {
 }
 document.getElementById('reloadBtn').addEventListener('click', refresh);
 
-document.getElementById('fTeam').addEventListener('change', e => {
-  STATE.teams = Array.from(e.target.selectedOptions).map(o => o.value).filter(Boolean);
-  refresh();
-});
-document.getElementById('fTeamExclude').addEventListener('change', e => {
-  STATE.teamsExclude = Array.from(e.target.selectedOptions).map(o => o.value).filter(Boolean);
-  refresh();
-});
+// Team filter popup wiring
+(function () {
+  const btn    = document.getElementById('teamFilterBtn');
+  const panel  = document.getElementById('teamFilterPanel');
+  const allCb  = document.getElementById('teamAll');
+  const apply  = document.getElementById('teamApply');
+  const cancel = document.getElementById('teamCancel');
+  if (!btn || !panel) return;
+  btn.addEventListener('click', () => {
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  });
+  document.body.addEventListener('click', e => {
+    if (!panel.contains(e.target) && e.target !== btn) panel.style.display = 'none';
+  });
+  allCb.addEventListener('change', e => {
+    panel.querySelectorAll('.teamOpt').forEach(cb => cb.checked = e.target.checked);
+  });
+  apply.addEventListener('click', () => {
+    const boxes = Array.from(panel.querySelectorAll('.teamOpt'));
+    const allChecked = boxes.every(cb => cb.checked);
+    const noneChecked = boxes.every(cb => !cb.checked);
+    STATE.teams = (allChecked || noneChecked) ? [] : boxes.filter(cb => cb.checked).map(cb => cb.value);
+    updateTeamButton();
+    panel.style.display = 'none';
+    refresh();
+  });
+  cancel.addEventListener('click', () => { panel.style.display = 'none'; });
+})();
+
 document.getElementById('fReviewer').addEventListener('change', e => { STATE.reviewer = e.target.value; refresh(); });
 document.getElementById('fCode').addEventListener('change', e => { STATE.code = e.target.value; refresh(); });
 document.getElementById('fTaskGlobal').addEventListener('change', e => {
@@ -975,6 +1037,23 @@ if (hoursSeg) hoursSeg.addEventListener('click', e => {
   hoursSeg.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
   if (STATE.view === 'hours') refresh();
 });
+
+// Actual Time filter (Assignments view)
+const atMode = document.getElementById('atMode');
+if (atMode) {
+  atMode.addEventListener('change', e => {
+    const v = e.target.value;
+    document.getElementById('atMax').style.display = (v === 'between') ? '' : 'none';
+  });
+  document.getElementById('atApply').addEventListener('click', () => {
+    STATE.atMode = document.getElementById('atMode').value;
+    const min = document.getElementById('atMin').value;
+    const max = document.getElementById('atMax').value;
+    STATE.atMin = min === '' ? null : parseFloat(min);
+    STATE.atMax = max === '' ? null : parseFloat(max);
+    if (STATE.view === 'rows') refresh();
+  });
+}
 
 // CSV Export buttons — one delegated handler for every `data-export` attr
 document.body.addEventListener('click', e => {
@@ -1145,10 +1224,10 @@ async function loadHours(R) {
     { key:'code',           label:'Code' },
     { key:'reviewer_name',  label:'Reviewer' },
     { key:'team',           label:'Team' },
-    { key:'matches',        label:'Matches',           num:true },
-    { key:'actual',         label:'Actual (min)',      num:true },
-    { key:'break_time',     label:'Break (min)',       num:true },
-    { key:'total',          label:'Total (min)',       num:true },
+    { key:'matches',        label:'Matches',   num:true },
+    { key:'actual',         label:'Actual',    num:true, render: r => minToHM(r.actual) },
+    { key:'break_time',     label:'Break',     num:true, render: r => minToHM(r.break_time) },
+    { key:'total',          label:'Total',     num:true, render: r => minToHM(r.total) },
   ], rows);
 }
 

@@ -264,8 +264,19 @@
     </div>
     <div class="filters">
       <select id="fTaskGlobal" class="select" title="Filter by task"><option value="">All tasks</option></select>
-      <select id="fTeam" class="select" multiple size="1" title="Teams to include (ctrl-click for multiple)"></select>
-      <select id="fTeamExclude" class="select" multiple size="1" title="Teams to exclude (ctrl-click for multiple)"></select>
+      <div id="teamFilterWrap" style="display:inline-flex;align-items:center;gap:6px;position:relative;">
+        <button type="button" id="teamFilterBtn" class="btn-icon" style="min-width:140px;text-align:left;">All teams</button>
+        <div id="teamFilterPanel" style="display:none;position:absolute;top:100%;left:0;margin-top:4px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;z-index:100;min-width:220px;max-height:340px;overflow:auto;box-shadow:var(--shadow);">
+          <label style="display:flex;align-items:center;gap:6px;padding:4px 6px;font-weight:600;border-bottom:1px solid var(--border);margin-bottom:6px;cursor:pointer;">
+            <input type="checkbox" id="teamAll"><span>All teams</span>
+          </label>
+          <div id="teamCheckboxes" style="max-height:220px;overflow:auto;"></div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <button type="button" class="btn btn-primary" id="teamApply" style="flex:1;">Apply</button>
+            <button type="button" class="btn" id="teamCancel">Cancel</button>
+          </div>
+        </div>
+      </div>
       <select id="fReviewer" class="select"><option value="">All reviewers</option></select>
       <select id="fCode" class="select"><option value="">All codes</option></select>
       <div class="segment" id="rangeSeg">
@@ -464,7 +475,16 @@
     <div class="panel">
       <div class="panel-header">
         <h3 class="panel-title">Assignments</h3>
-        <div class="panel-actions">
+        <div class="panel-actions" style="gap:10px;">
+          <span class="panel-sub">Actual (min):</span>
+          <select id="atMode" class="select" style="padding:6px 8px;">
+            <option value="">any</option>
+            <option value="lt">less than</option>
+            <option value="between">between</option>
+          </select>
+          <input id="atMin" class="input" type="number" placeholder="min" style="width:80px;padding:6px 8px;">
+          <input id="atMax" class="input" type="number" placeholder="max" style="width:80px;padding:6px 8px;display:none;">
+          <button class="btn-icon" id="atApply">Apply</button>
           <span class="chip" id="rowsCount">0</span>
           <button class="btn-icon" data-export="tblRows">Export CSV</button>
         </div>
