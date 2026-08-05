@@ -1326,6 +1326,33 @@ const IMPORT_CONFIG = {
 };
 function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 
+// Normalize date-ish cell values to ISO yyyy-mm-dd (or yyyy-mm-ddTHH:MM:SS).
+// Handles: 'YYYY-MM-DD', 'M/D/YYYY', 'MM/DD/YYYY', with optional time.
+// Anything unrecognized → original string.
+function normalizeDate(v) {
+  if (v == null) return '';
+  const s = String(v).trim();
+  if (!s) return '';
+  // Already ISO?
+  if (/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(s)) return s;
+  // M/D/YYYY [time...] — Sheets US default format
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(\s+.*)?$/);
+  if (m) {
+    const mm = m[1].padStart(2, '0');
+    const dd = m[2].padStart(2, '0');
+    const yyyy = m[3];
+    // Preserve optional time chunk if present
+    const rest = (m[4] || '').trim();
+    return rest ? `${yyyy}-${mm}-${dd} ${rest}` : `${yyyy}-${mm}-${dd}`;
+  }
+  return s;
+}
+
+// Column-name → is-this-a-date? — used to decide whether to normalize.
+function isDateColName(name) {
+  return /(_date|_started|_ended|last_modified)$/i.test(name);
+}
+
 // Robust minimal CSV parser: handles quoted fields, escaped quotes, commas
 // inside quotes, and CRLF/LF line endings. No dependency.
 function parseCSV(text) {
@@ -1411,10 +1438,12 @@ async function runImport() {
       sql,
       args: cfg.dbCols.map(c => {
         const j = mapping[c];
-        if (j != null && j < row.length) return row[j];
-        // Auto-fill certain columns when CSV doesn't provide them
-        if (c === 'last_modified') return importTs;
-        return '';
+        let v = (j != null && j < row.length) ? row[j] : '';
+        // Normalize known date columns to ISO — fixes M/D/YYYY → YYYY-MM-DD.
+        if (isDateColName(c)) v = normalizeDate(v);
+        // Auto-fill last_modified when CSV doesn't provide it.
+        if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
+        return v;
       }),
     }));
     try {
