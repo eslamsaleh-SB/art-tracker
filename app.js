@@ -787,7 +787,10 @@ async function loadRows(R) {
   const commonWhere = `
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
-      AND assignment_date <= (SELECT substr(MAX(review_started), 1, 10) FROM data_logs)
+      AND substr(assignment_date, 1, 10) <= COALESCE(
+        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+        '2999-12-31'   -- fallback when data_logs empty: no cap
+      )
       ${ef.sql}
   `;
   const totalRow = (await query(
