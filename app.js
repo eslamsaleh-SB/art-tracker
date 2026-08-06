@@ -138,6 +138,7 @@ const STATE = {
   revTopN: 20,
   revShowAll: false,
   hoursGran: 'week',   // 'day' | 'week'
+  extraTask: 'all',    // 'all' | 'Players New Players' | 'B - C Review'
   filtersLoaded: false,
   sortState: {},       // { tblId: { key, dir } }
   lastRows: {},        // { tblId: [rows] } — for CSV export
@@ -313,7 +314,9 @@ function setView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + name));
   document.getElementById('pageTitle').textContent = {
     overview: 'Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer',
-    rows: 'Assignments', nologs: 'No Logs', partial: 'Partial Coverage',
+    rows: 'Assignments',
+    players: 'Players', bc: 'B - C Review',
+    nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
   }[name] || name;
   refresh();
@@ -418,6 +421,16 @@ async function refresh(opts) {
     if (STATE.view === 'tasks')     await loadTasks(R);
     if (STATE.view === 'reviewers') await loadReviewers(R);
     if (STATE.view === 'rows')      await loadRows(R);
+    if (STATE.view === 'players')   await loadExtraTable(R, {
+      table: 'players', taskLabel: 'Players New Players',
+      kpisId: 'playersKpis',
+      tblReviewer: 'tblPlayersReviewer', tblRows: 'tblPlayersRows', countId: 'playersRowsCount',
+    });
+    if (STATE.view === 'bc')        await loadExtraTable(R, {
+      table: 'bc_review', taskLabel: 'B - C Review',
+      kpisId: 'bcKpis',
+      tblReviewer: 'tblBcReviewer', tblRows: 'tblBcRows', countId: 'bcRowsCount',
+    });
     if (STATE.view === 'nologs')    await loadNoLogs(R);
     if (STATE.view === 'partial')   await loadPartial(R);
     if (STATE.view === 'hours')     await loadHours(R);
@@ -1171,6 +1184,224 @@ try {
   const saved = localStorage.getItem('art_theme');
   if (saved) document.documentElement.setAttribute('data-theme', saved);
 } catch(_) {}
+
+// ============================================================
+// Extra table view — parameterized by (table name, DOM ids). One instance
+// for `players`, one for `bc_review`. Same layout, different SQL target.
+// ============================================================
+async function loadExtraTable(R, opt) {
+  const table = opt.table;
+  const start = R.start, end = R.end;
+  const like  = STATE.q ? '%' + STATE.q + '%' : '';
+  const args  = [start, end, like];
+
+  // KPIs
+  const kpi = (await query(`
+    SELECT
+      COUNT(*) AS assignments,
+      COUNT(DISTINCT match_id) AS distinct_matches,
+      COUNT(DISTINCT code) AS reviewers
+    FROM ${table}
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR code LIKE ?3)
+  `, args)).rows[0] || {};
+
+  // Avg review time (rule-aware via same expr)
+  const avg = (await query(`
+    SELECT AVG(match_total) AS avg_actual FROM (
+      SELECT a.match_id, a.code, a.half, a.side,
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
+      FROM ${table} a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.code LIKE ?3)
+      GROUP BY a.match_id, a.code, a.half, a.side
+    )
+  `, args)).rows[0] || {};
+
+  const cards = [
+    { label: 'Assignments',      value: fmt(kpi.assignments),      sub: 'total rows' },
+    { label: 'Distinct matches', value: fmt(kpi.distinct_matches), sub: 'unique games' },
+    { label: 'Reviewers',        value: fmt(kpi.reviewers),        sub: 'active in range' },
+    { label: 'Avg review time',  value: avg.avg_actual != null ? fmt(avg.avg_actual) + ' min' : '—', sub: '' },
+  ];
+  document.getElementById(opt.kpisId).innerHTML = cards.map(c => `
+    <div class="kpi">
+      <div class="kpi-label">${esc(c.label)}</div>
+      <div class="kpi-value">${esc(c.value)}</div>
+      <div class="kpi-sub">${esc(c.sub)}</div>
+    </div>
+  `).join('');
+
+  // Reviewer breakdown
+  const revs = (await query(`
+    SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
+           COUNT(*) AS matches_listed,
+           COUNT(DISTINCT a.match_id) AS distinct_matches,
+           (SELECT AVG(match_total) FROM (
+              SELECT a2.match_id, a2.code, a2.half, a2.side,
+                     SUM(${ruleActualExpr('a2','dl2')}) AS match_total
+              FROM ${table} a2
+              JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.code = a2.code
+              WHERE a2.code = a.code
+                AND a2.assignment_date BETWEEN ?1 AND ?2
+              GROUP BY a2.match_id, a2.code, a2.half, a2.side
+            )) AS avg_actual
+    FROM ${table} a
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.code LIKE ?3)
+    GROUP BY a.code, a.reviewer_name, a.team
+    ORDER BY matches_listed DESC
+    LIMIT 500
+  `, args)).rows;
+  renderTable(opt.tblReviewer, [
+    { key:'code',             label:'Code' },
+    { key:'reviewer_name',    label:'Reviewer' },
+    { key:'team',             label:'Team' },
+    { key:'matches_listed',   label:'Assignments',      num:true },
+    { key:'distinct_matches', label:'Distinct matches', num:true },
+    { key:'avg_actual',       label:'Avg actual (min)', num:true },
+  ], revs);
+
+  // Raw assignments list
+  const rows = (await query(`
+    SELECT match_id, assignment_date, competition, home_team, away_team,
+           task, half, side, code, reviewer_name, team
+    FROM ${table}
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR code LIKE ?3)
+    ORDER BY assignment_date DESC, match_id DESC
+    LIMIT 1000
+  `, args)).rows;
+  document.getElementById(opt.countId).textContent = rows.length + ' rows';
+  renderTable(opt.tblRows, [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
+    { key:'competition',     label:'Competition' },
+    { key:'home_team',       label:'Home' },
+    { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'half',            label:'Half' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+  ], rows);
+}
+
+// LEGACY — no longer used, kept as reference stub
+async function loadExtra(R) {
+  const start = R.start, end = R.end;
+  const like  = STATE.q ? '%' + STATE.q + '%' : '';
+  const taskFilter = STATE.extraTask === 'all' ? '' : "AND task = ?4";
+  const args = STATE.extraTask === 'all' ? [start, end, like] : [start, end, like, STATE.extraTask];
+
+  // KPI cards — one per task shown separately + a total
+  const kpi = (await query(`
+    SELECT task,
+           COUNT(*) AS assignments,
+           COUNT(DISTINCT match_id) AS distinct_matches,
+           COUNT(DISTINCT code) AS reviewers
+    FROM extra_tasks
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
+      ${taskFilter}
+    GROUP BY task
+    ORDER BY task
+  `, args)).rows;
+
+  // Avg review time per task via data_logs join (Half/Side rule aware)
+  const avg = (await query(`
+    SELECT task, AVG(match_total) AS avg_actual FROM (
+      SELECT a.task AS task, a.match_id, a.code, a.half, a.side,
+             SUM(${ruleActualExpr('a','dl')}) AS match_total
+      FROM extra_tasks a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+        ${taskFilter}
+      GROUP BY a.task, a.match_id, a.code, a.half, a.side
+    )
+    GROUP BY task
+  `, args)).rows;
+  const avgBy = {};
+  avg.forEach(r => { avgBy[r.task] = r.avg_actual; });
+
+  // KPI card render
+  const cards = kpi.map(k => ({
+    label: k.task, value: fmt(k.assignments),
+    sub: `${fmt(k.distinct_matches)} matches · ${fmt(k.reviewers)} reviewers · avg ${avgBy[k.task] != null ? fmt(avgBy[k.task]) + ' min' : '—'}`,
+  }));
+  document.getElementById('extraKpis').innerHTML = cards.length ? cards.map(c => `
+    <div class="kpi">
+      <div class="kpi-label">${esc(c.label)}</div>
+      <div class="kpi-value">${esc(c.value)}</div>
+      <div class="kpi-sub">${esc(c.sub)}</div>
+    </div>
+  `).join('') : '<div class="empty">No data.</div>';
+
+  // Charts
+  bar('chartExtraCount', kpi.map(r => r.task), kpi.map(r => r.assignments), 'Assignments');
+  bar('chartExtraAvg', kpi.map(r => r.task), kpi.map(r => avgBy[r.task] != null ? round1(avgBy[r.task]) : 0), 'Avg (min)');
+
+  // Reviewer breakdown
+  const revs = (await query(`
+    SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team, a.task AS task,
+           COUNT(*) AS matches_listed,
+           COUNT(DISTINCT a.match_id) AS distinct_matches,
+           (SELECT AVG(match_total) FROM (
+              SELECT a2.match_id, a2.code, a2.half, a2.side,
+                     SUM(${ruleActualExpr('a2','dl2')}) AS match_total
+              FROM extra_tasks a2
+              JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.code = a2.code
+              WHERE a2.code = a.code AND a2.task = a.task
+                AND a2.assignment_date BETWEEN ?1 AND ?2
+              GROUP BY a2.match_id, a2.code, a2.half, a2.side
+            )) AS avg_actual
+    FROM extra_tasks a
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.code LIKE ?3 OR a.task LIKE ?3)
+      ${taskFilter}
+    GROUP BY a.code, a.reviewer_name, a.team, a.task
+    ORDER BY matches_listed DESC
+    LIMIT 300
+  `, args)).rows;
+  renderTable('tblExtraReviewer', [
+    { key:'task',             label:'Task' },
+    { key:'code',             label:'Code' },
+    { key:'reviewer_name',    label:'Reviewer' },
+    { key:'team',             label:'Team' },
+    { key:'matches_listed',   label:'Assignments',      num:true },
+    { key:'distinct_matches', label:'Distinct matches', num:true },
+    { key:'avg_actual',       label:'Avg actual (min)', num:true },
+  ], revs);
+
+  // Raw assignments listing
+  const rows = (await query(`
+    SELECT match_id, assignment_date, competition, home_team, away_team,
+           task, half, side, code, reviewer_name, team
+    FROM extra_tasks
+    WHERE assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
+      ${taskFilter}
+    ORDER BY assignment_date DESC, match_id DESC
+    LIMIT 1000
+  `, args)).rows;
+  document.getElementById('extraRowsCount').textContent = rows.length + ' rows';
+  renderTable('tblExtraRows', [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
+    { key:'competition',     label:'Competition' },
+    { key:'home_team',       label:'Home' },
+    { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'half',            label:'Half' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+  ], rows);
+}
 
 // ============================================================
 // No Logs view — assignments w/ NO data_logs, BUT only where

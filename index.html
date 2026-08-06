@@ -251,6 +251,8 @@
     <button class="nav-item" data-view="tasks"><span class="ico">▤</span><span>By Task</span></button>
     <button class="nav-item" data-view="reviewers"><span class="ico">◉</span><span>By Reviewer</span></button>
     <button class="nav-item" data-view="rows"><span class="ico">≡</span><span>Assignments</span></button>
+    <button class="nav-item" data-view="players"><span class="ico">◆</span><span>Players</span></button>
+    <button class="nav-item" data-view="bc"><span class="ico">◇</span><span>B - C Review</span></button>
     <button class="nav-item" data-view="nologs"><span class="ico">✖</span><span>No Logs</span></button>
     <button class="nav-item" data-view="partial"><span class="ico">◐</span><span>Partial Cover</span></button>
     <button class="nav-item" data-view="hours"><span class="ico">⏱</span><span>Hours</span></button>
@@ -372,6 +374,50 @@
         <button class="btn-icon" data-export="tblReviewer">Export CSV</button>
       </div>
       <div class="table-wrap"><table id="tblReviewer"></table></div>
+    </div>
+  </section>
+
+  <!-- PLAYERS view -->
+  <section id="view-players" class="view hidden">
+    <div class="kpi-grid" id="playersKpis"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">By reviewer</h3>
+        <button class="btn-icon" data-export="tblPlayersReviewer">Export CSV</button>
+      </div>
+      <div class="table-wrap"><table id="tblPlayersReviewer"></table></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Assignments</h3>
+        <div class="panel-actions">
+          <span class="chip" id="playersRowsCount">0</span>
+          <button class="btn-icon" data-export="tblPlayersRows">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblPlayersRows"></table></div>
+    </div>
+  </section>
+
+  <!-- B - C REVIEW view -->
+  <section id="view-bc" class="view hidden">
+    <div class="kpi-grid" id="bcKpis"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">By reviewer</h3>
+        <button class="btn-icon" data-export="tblBcReviewer">Export CSV</button>
+      </div>
+      <div class="table-wrap"><table id="tblBcReviewer"></table></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Assignments</h3>
+        <div class="panel-actions">
+          <span class="chip" id="bcRowsCount">0</span>
+          <button class="btn-icon" data-export="tblBcRows">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblBcRows"></table></div>
     </div>
   </section>
 
