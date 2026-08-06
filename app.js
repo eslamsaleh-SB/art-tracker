@@ -807,7 +807,11 @@ async function loadRows(R) {
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
       AND substr(assignment_date, 1, 10) <= COALESCE(
         (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
-        '2999-12-31'   -- fallback when data_logs empty: no cap
+        '2999-12-31'
+      )
+      AND EXISTS (
+        SELECT 1 FROM data_logs dl
+        WHERE dl.matchid = assignments.match_id AND dl.code = assignments.code
       )
       ${ef.sql}
   `;
