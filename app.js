@@ -448,17 +448,22 @@ async function loadOverview(R) {
       ${ef.sql}
   `, [start, end, like, ...ef.args])).rows[0] || {};
 
+  // Overall avg = avg of per-(match, code) totals, deduped so multi-task
+  // assignments on the same match don't multi-count the same log time.
   const overall = (await query(`
     SELECT AVG(match_total) AS avg_actual, COUNT(*) AS matches
     FROM (
-      SELECT a.match_id AS match_id, a.code AS code,
-             SUM(${ruleActualExpr('a','dl')}) AS match_total
-      FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-      WHERE a.assignment_date BETWEEN ?1 AND ?2
-        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
-        ${efA.sql}
-      GROUP BY a.match_id, a.code, a.half, a.side
+      SELECT dl.matchid AS match_id, dl.code AS code,
+             SUM(dl.actual_time_taken) AS match_total
+      FROM data_logs dl
+      WHERE EXISTS (
+        SELECT 1 FROM assignments a
+        WHERE a.match_id = dl.matchid AND a.code = dl.code
+          AND a.assignment_date BETWEEN ?1 AND ?2
+          AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
+          ${efA.sql}
+      )
+      GROUP BY dl.matchid, dl.code
     )
   `, [start, end, like, ...efA.args])).rows[0] || {};
 
