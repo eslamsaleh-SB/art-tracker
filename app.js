@@ -1332,44 +1332,65 @@ async function loadExtraTable(R, opt) {
   ], revs);
 
   // Raw assignments list — enriched via JOIN + per-side/per-part actual time
+  // Team/reviewer/code filters run on resolved values (from assignments lookup)
+  // since players/bc_review may have blank team.
+  let n = 4;
+  const teamFilters = [];
+  const rowsArgs = args.slice();
+  if (STATE.teams && STATE.teams.length) {
+    const ph = STATE.teams.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`team IN (${ph})`);
+    rowsArgs.push(...STATE.teams);
+  }
+  if (STATE.teamsExclude && STATE.teamsExclude.length) {
+    const ph = STATE.teamsExclude.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`team NOT IN (${ph})`);
+    rowsArgs.push(...STATE.teamsExclude);
+  }
+  if (STATE.reviewer)   { teamFilters.push(`reviewer_name = ?${n++}`); rowsArgs.push(STATE.reviewer); }
+  if (STATE.code)       { teamFilters.push(`code = ?${n++}`);          rowsArgs.push(STATE.code); }
+  const outerWhere = teamFilters.length ? 'WHERE ' + teamFilters.join(' AND ') : '';
+
   const rows = (await query(`
-    SELECT p.match_id, p.assignment_date,
-           COALESCE(NULLIF(p.competition, ''), am.competition) AS competition,
-           COALESCE(NULLIF(p.home_team, ''),   am.home_team)   AS home_team,
-           COALESCE(NULLIF(p.away_team, ''),   am.away_team)   AS away_team,
-           p.task, p.half, p.side, p.code,
-           COALESCE(NULLIF(p.reviewer_name, ''), ac.reviewer_name) AS reviewer_name,
-           COALESCE(NULLIF(p.team, ''),          ac.team)          AS team,
-           ${actualExprAs('p')} AS actual_time
-    FROM ${table} p
-    LEFT JOIN (
-      SELECT code,
-             (SELECT reviewer_name FROM assignments WHERE code = a.code
-                AND reviewer_name IS NOT NULL AND reviewer_name <> ''
-                GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1) AS reviewer_name,
-             (SELECT team FROM assignments WHERE code = a.code
-                AND team IS NOT NULL AND team <> ''
-                GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team
-      FROM assignments a WHERE code IS NOT NULL AND code <> '' GROUP BY code
-    ) ac ON ac.code = p.code
-    LEFT JOIN (
-      SELECT match_id,
-             MAX(competition) AS competition,
-             MAX(home_team) AS home_team,
-             MAX(away_team) AS away_team
-      FROM assignments WHERE match_id IS NOT NULL AND match_id <> '' GROUP BY match_id
-    ) am ON am.match_id = p.match_id
-    WHERE p.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3
-           OR ac.reviewer_name LIKE ?3 OR am.competition LIKE ?3)
-      -- Only show assignments up to the latest logged work day
-      AND substr(p.assignment_date, 1, 10) <= COALESCE(
-        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
-        '2999-12-31'
-      )
-    ORDER BY p.assignment_date DESC, p.match_id DESC
+    SELECT * FROM (
+      SELECT p.match_id, p.assignment_date,
+             COALESCE(NULLIF(p.competition, ''), am.competition) AS competition,
+             COALESCE(NULLIF(p.home_team, ''),   am.home_team)   AS home_team,
+             COALESCE(NULLIF(p.away_team, ''),   am.away_team)   AS away_team,
+             p.task, p.half, p.side, p.code,
+             COALESCE(NULLIF(p.reviewer_name, ''), ac.reviewer_name) AS reviewer_name,
+             COALESCE(NULLIF(p.team, ''),          ac.team)          AS team,
+             ${actualExprAs('p')} AS actual_time
+      FROM ${table} p
+      LEFT JOIN (
+        SELECT code,
+               (SELECT reviewer_name FROM assignments WHERE code = a.code
+                  AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                  GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1) AS reviewer_name,
+               (SELECT team FROM assignments WHERE code = a.code
+                  AND team IS NOT NULL AND team <> ''
+                  GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team
+        FROM assignments a WHERE code IS NOT NULL AND code <> '' GROUP BY code
+      ) ac ON ac.code = p.code
+      LEFT JOIN (
+        SELECT match_id,
+               MAX(competition) AS competition,
+               MAX(home_team) AS home_team,
+               MAX(away_team) AS away_team
+        FROM assignments WHERE match_id IS NOT NULL AND match_id <> '' GROUP BY match_id
+      ) am ON am.match_id = p.match_id
+      WHERE p.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3
+             OR ac.reviewer_name LIKE ?3 OR am.competition LIKE ?3)
+        AND substr(p.assignment_date, 1, 10) <= COALESCE(
+          (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+          '2999-12-31'
+        )
+    )
+    ${outerWhere}
+    ORDER BY assignment_date DESC, match_id DESC
     LIMIT 1000
-  `, args)).rows;
+  `, rowsArgs)).rows;
   document.getElementById(opt.countId).textContent = rows.length + ' rows';
   renderTable(opt.tblRows, [
     { key:'match_id',        label:'Match ID' },
@@ -1396,32 +1417,54 @@ async function loadExtraTable(R, opt) {
 async function loadExtraNoLogs(R, opt) {
   const start = R.start, end = R.end;
   const like  = STATE.q ? '%' + STATE.q + '%' : '';
+  const args  = [start, end, like];
+  // Build team/reviewer/code filter clauses that operate on the resolved team
+  // (from assignments lookup) since players/bc_review may have team blank.
+  let n = 4;
+  const teamFilters = [];
+  if (STATE.teams && STATE.teams.length) {
+    const ph = STATE.teams.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`resolved_team IN (${ph})`);
+    args.push(...STATE.teams);
+  }
+  if (STATE.teamsExclude && STATE.teamsExclude.length) {
+    const ph = STATE.teamsExclude.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`resolved_team NOT IN (${ph})`);
+    args.push(...STATE.teamsExclude);
+  }
+  if (STATE.reviewer)   { teamFilters.push(`resolved_reviewer = ?${n++}`); args.push(STATE.reviewer); }
+  if (STATE.code)       { teamFilters.push(`code = ?${n++}`);              args.push(STATE.code); }
+  const havingClause = teamFilters.length ? 'WHERE ' + teamFilters.join(' AND ') : '';
+
   const rows = (await query(`
-    SELECT p.match_id, p.assignment_date, p.task, p.half, p.side, p.code,
-           COALESCE(NULLIF(p.reviewer_name, ''),
-                    (SELECT reviewer_name FROM assignments WHERE code = p.code
-                       AND reviewer_name IS NOT NULL AND reviewer_name <> ''
-                       GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS reviewer_name,
-           (SELECT team FROM assignments WHERE code = p.code
-              AND team IS NOT NULL AND team <> ''
-              GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team
-    FROM ${opt.table} p
-    WHERE p.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
-      -- Skip malformed rows w/ no reviewer code (they can't possibly log work)
-      AND p.code IS NOT NULL AND p.code <> ''
-      -- Only flag as "No Logs" if assignment date is on or before the last logged day
-      -- (recent unlogged assignments hidden — work not expected yet)
-      AND substr(p.assignment_date, 1, 10) <= COALESCE(
-        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
-        '2999-12-31'
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
-      )
-    ORDER BY p.assignment_date DESC, p.match_id DESC
+    SELECT * FROM (
+      SELECT p.match_id, p.assignment_date, p.task, p.half, p.side, p.code,
+             COALESCE(NULLIF(p.reviewer_name, ''),
+                      (SELECT reviewer_name FROM assignments WHERE code = p.code
+                         AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                         GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS resolved_reviewer,
+             COALESCE(NULLIF(p.team, ''),
+                      (SELECT team FROM assignments WHERE code = p.code
+                         AND team IS NOT NULL AND team <> ''
+                         GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1)) AS resolved_team
+      FROM ${opt.table} p
+      WHERE p.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
+        AND p.code IS NOT NULL AND p.code <> ''
+        AND substr(p.assignment_date, 1, 10) <= COALESCE(
+          (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+          '2999-12-31'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
+        )
+    )
+    ${havingClause}
+    ORDER BY assignment_date DESC, match_id DESC
     LIMIT 2000
-  `, [start, end, like])).rows;
+  `, args)).rows;
+  // Rename for existing renderer
+  rows.forEach(r => { r.reviewer_name = r.resolved_reviewer; r.team = r.resolved_team; });
   document.getElementById(opt.countId).textContent = rows.length + ' rows';
   renderTable(opt.tblId, [
     { key:'match_id',        label:'Match ID' },
