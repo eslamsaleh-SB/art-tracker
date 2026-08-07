@@ -66,21 +66,30 @@ async function loadCommentsFor(table) {
   COMMENTS.byTable[table] = map;
   return map;
 }
-async function saveComment(table, row_key, row_data, author, comment, status) {
+// Save comment. If `changeStatus` is true, uses admin-gated endpoint.
+// Otherwise uses the public /api/comment/note endpoint (comment+author only).
+async function saveComment(table, row_key, row_data, author, comment, status, changeStatus) {
   const token = getAdminToken();
-  if (!token) { alert('Admin token missing — open the Import CSV tab, paste your token, then reload.'); return null; }
-  const r = await fetch('/api/comment', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
-    body: JSON.stringify({ table, row_key, row_data, author, comment, status }),
-  });
+  let url, headers, body;
+  if (changeStatus) {
+    if (!token) { alert('Setting status requires admin token — open Import CSV, paste token, reload.'); return null; }
+    url = '/api/comment';
+    headers = { 'Content-Type': 'application/json', 'X-Admin-Token': token };
+    body = JSON.stringify({ table, row_key, row_data, author, comment, status });
+  } else {
+    url = '/api/comment/note';
+    headers = { 'Content-Type': 'application/json' };
+    body = JSON.stringify({ table, row_key, row_data, author, comment });
+  }
+  const r = await fetch(url, { method: 'POST', headers, body });
   if (!r.ok) { alert('Save failed: ' + await r.text()); return null; }
   const j = await r.json();
-  // Update local cache
   COMMENTS.byTable[table] = COMMENTS.byTable[table] || {};
+  const prev = COMMENTS.byTable[table][row_key] || {};
   COMMENTS.byTable[table][row_key] = {
-    row_key, author, comment, status,
-    created_at: (COMMENTS.byTable[table][row_key]?.created_at) || j.updated_at,
+    row_key, author, comment,
+    status: changeStatus ? status : (prev.status || ''),
+    created_at: prev.created_at || j.updated_at,
     updated_at: j.updated_at,
   };
   return j;
@@ -107,8 +116,17 @@ function openCommentModal(table, row_key, row_data, refreshFn) {
   authorSel.innerHTML = '<option value="">-- select --</option>' +
     COMMENT_AUTHORS.map(a => `<option value="${esc(a)}"${a===existing.author?' selected':''}>${esc(a)}</option>`).join('');
   const statusSel = document.getElementById('cmStatus');
+  const hasAdminToken = !!getAdminToken();
   statusSel.innerHTML = COMMENT_STATUSES.map(s =>
     `<option value="${s}"${s===(existing.status||'')?' selected':''}>${s || '(none)'}</option>`).join('');
+  statusSel.disabled = !hasAdminToken;
+  const statusHint = document.getElementById('cmStatusHint');
+  if (statusHint) {
+    statusHint.textContent = hasAdminToken
+      ? 'Editable — requires admin token (loaded ✓)'
+      : 'Locked — paste admin token in Import CSV tab to change';
+    statusHint.style.color = hasAdminToken ? '#4caf50' : 'var(--text-dim)';
+  }
   document.getElementById('cmText').value = existing.comment || '';
   document.getElementById('cmMeta').textContent = existing.updated_at
     ? `Last edit: ${existing.updated_at.slice(0,19).replace('T',' ')} by ${existing.author || '—'}`
@@ -117,7 +135,7 @@ function openCommentModal(table, row_key, row_data, refreshFn) {
   const saveBtn = document.getElementById('cmSave');
   const delBtn  = document.getElementById('cmDelete');
   const closeBtn= document.getElementById('cmClose');
-  delBtn.style.display = existing.comment ? 'inline-block' : 'none';
+  delBtn.style.display = (existing.comment && hasAdminToken) ? 'inline-block' : 'none';
 
   saveBtn.onclick = async () => {
     const author = authorSel.value;
@@ -125,8 +143,10 @@ function openCommentModal(table, row_key, row_data, refreshFn) {
     const text = document.getElementById('cmText').value.trim();
     if (!author) { alert('Pick a name'); return; }
     if (!text)   { alert('Write a comment'); return; }
+    // changeStatus = did the user actually change the status vs. what's stored?
+    const changeStatus = (status !== (existing.status || ''));
     saveBtn.disabled = true;
-    await saveComment(table, row_key, row_data, author, text, status);
+    await saveComment(table, row_key, row_data, author, text, status, changeStatus);
     saveBtn.disabled = false;
     document.getElementById('cmModal').style.display = 'none';
     if (refreshFn) refreshFn();
