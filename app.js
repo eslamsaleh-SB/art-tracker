@@ -159,17 +159,26 @@ function withComments(table, cols, rows, keyFields, refreshFn) {
     if (f.status && (!r._cm || (r._cm.status || '') !== f.status)) return false;
     return true;
   });
-  const newCols = cols.concat([{
-    key: '_comment', label: 'Comment', raw: true,
-    render: (r) => {
-      const c = r._cm;
-      if (!c) return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}">+ add</button>`;
-      const badge = c.status === 'approved' ? '<span style="color:#4caf50">●</span>'
-                  : c.status === 'investigation' ? '<span style="color:#ff9800">●</span>' : '';
-      const snippet = esc((c.comment || '').slice(0, 60));
-      return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}" title="${esc(c.comment || '')}">${badge} ${esc(c.author || '?')}: ${snippet}${c.comment && c.comment.length > 60 ? '…' : ''}</button>`;
+  const newCols = cols.concat([
+    {
+      key: '_status', label: 'Status', raw: true,
+      render: (r) => {
+        const s = r._cm?.status || '';
+        if (s === 'approved') return `<span style="background:#1e4620;color:#4caf50;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">✓ Approved</span>`;
+        if (s === 'investigation') return `<span style="background:#4a3620;color:#ff9800;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">⚠ Investigation</span>`;
+        return `<span style="color:var(--text-dim);">—</span>`;
+      }
+    },
+    {
+      key: '_comment', label: 'Comment', raw: true,
+      render: (r) => {
+        const c = r._cm;
+        if (!c) return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}">+ add</button>`;
+        const snippet = esc((c.comment || '').slice(0, 60));
+        return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}" title="${esc(c.comment || '')}">${esc(c.author || '?')}: ${snippet}${c.comment && c.comment.length > 60 ? '…' : ''}</button>`;
+      }
     }
-  }]);
+  ]);
   // Delegate click on cm-btn to open modal (attach once per render)
   setTimeout(() => {
     document.querySelectorAll('.cm-btn').forEach(btn => {
