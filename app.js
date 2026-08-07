@@ -822,7 +822,7 @@ async function loadRows(R) {
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
       AND substr(assignment_date, 1, 10) <= COALESCE(
-        (SELECT MAX(review_date) FROM data_logs),
+        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
         '2999-12-31'
       )
       AND EXISTS (
@@ -1549,7 +1549,7 @@ async function loadNoLogs(R) {
   const ef = extraFilterSQL('a.');
   const { rows } = await query(`
     WITH cutoff AS (
-      SELECT MAX(review_date) AS max_review FROM data_logs
+      SELECT substr(MAX(review_started), 1, 10) AS max_review FROM data_logs
     )
     SELECT a.match_id, a.assignment_date, a.competition, a.home_team, a.away_team,
            a.task, a.half, a.side, a.code, a.reviewer_name, a.team
@@ -1640,8 +1640,8 @@ async function loadHours(R) {
   const ef = extraFilterSQL('a.');
 
   const bucketExpr = STATE.hoursGran === 'day'
-    ? `dl.review_date`
-    : `date(dl.review_date, 'weekday 0', '-7 days')`;   // Sunday start
+    ? `substr(dl.review_started, 1, 10)`
+    : `date(dl.review_started, 'weekday 0', '-7 days')`;   // Sunday start
 
   // JOIN data_logs to assignments to inherit team/reviewer filters
   const { rows } = await query(`
@@ -1687,18 +1687,8 @@ const IMPORT_CONFIG = {
   },
   data_logs: {
     dbCols: ['matchid','code','partid','full_name','review_started','review_ended',
-             'actual_time_taken','total_break_time','total_time_taken','review_date'],
+             'actual_time_taken','total_break_time','total_time_taken'],
     aliases: { code: 'hr_code' },
-    // Compute review_date (YYYY-MM-DD) from review_started so it's part of the PK
-    computedCols: {
-      review_date: (rowByCol) => {
-        const v = String(rowByCol('review_started') || '').trim();
-        if (!v) return '';
-        // Try normalized ISO/space; fall back to M/D/YYYY
-        const nrm = normalizeDate(v);
-        return (nrm || v).substr(0, 10);
-      },
-    },
   },
   productivity_config: {
     dbCols: ['task','expected_minutes'],
