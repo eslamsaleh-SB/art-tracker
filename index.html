@@ -331,12 +331,18 @@
           <h3 class="panel-title">Per-task breakdown</h3>
           <div class="panel-sub">Click <b>+</b> to expand a task and see its trend</div>
         </div>
-        <div class="segment" id="taskGranSeg">
-          <button data-gran="day">Day</button>
-          <button data-gran="week">Week</button>
-          <button data-gran="month" class="active">Month</button>
-          <button data-gran="quarter">Quarter</button>
-          <button data-gran="year">Year</button>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-size:12px;">
+            <input type="checkbox" id="taskExcludeSameDay" style="cursor:pointer;">
+            Exclude same-reviewer / same-day matches
+          </label>
+          <div class="segment" id="taskGranSeg">
+            <button data-gran="day">Day</button>
+            <button data-gran="week">Week</button>
+            <button data-gran="month" class="active">Month</button>
+            <button data-gran="quarter">Quarter</button>
+            <button data-gran="year">Year</button>
+          </div>
         </div>
       </div>
     </div>

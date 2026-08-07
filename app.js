@@ -330,6 +330,7 @@ const STATE = {
   customEnd: '',
   gran: 'month',
   taskGran: 'month',
+  taskExcludeSameDay: false,   // exclude same-reviewer, same-day multi-match units from stats
   q: '',
   teams: [],           // multi-select include (empty = all)
   teamsExclude: [],    // deprecated — kept for backward compat, always empty now
@@ -744,7 +745,8 @@ async function loadTasks(R) {
   const ef  = extraFilterSQL('');
   const efA = extraFilterSQL('a.');
 
-  const summary = (await query(`
+  // Base summary — counts by task from assignments
+  const mainSummary = (await query(`
     WITH filtered AS (
       SELECT match_id, code, task, substr(assignment_date, 1, 7) AS ym
       FROM assignments
@@ -765,40 +767,174 @@ async function loadTasks(R) {
     top_month AS (SELECT task, ym FROM ranked_months WHERE rn = 1)
     SELECT c.task, c.assignments, c.distinct_matches, t.ym AS top_month
     FROM counts c LEFT JOIN top_month t ON t.task = c.task
-    ORDER BY c.assignments DESC
   `, [start, end, like, ...ef.args])).rows;
 
-  const avgRows = (await query(`
-    SELECT task, AVG(match_total) AS avg_actual FROM (
-      SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
-             SUM(${ruleActualExpr('a','dl')}) AS match_total
-      FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-      WHERE a.assignment_date BETWEEN ?1 AND ?2
-        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-        AND a.task IS NOT NULL AND a.task <> ''
-        ${efA.sql}
-      GROUP BY a.task, a.match_id, a.code, a.half, a.side
-    )
-    GROUP BY task
+  // Players count
+  const playersCount = (await query(`
+    SELECT 'Players New Players' AS task,
+           COUNT(*) AS assignments,
+           COUNT(DISTINCT match_id) AS distinct_matches
+    FROM players
+    WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}
+  `, [start, end, ...ef.args])).rows;
+
+  // BC count
+  const bcCount = (await query(`
+    SELECT 'B - C Review' AS task,
+           COUNT(*) AS assignments,
+           COUNT(DISTINCT match_id) AS distinct_matches
+    FROM bc_review
+    WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}
+  `, [start, end, ...ef.args])).rows;
+
+  const summary = [...mainSummary, ...playersCount, ...bcCount].filter(r => r.assignments > 0);
+
+  // Exclude same-reviewer/same-day multi-match units when toggle is on.
+  // A "unit" is dropped if its (code, day) has more than one distinct match_id
+  // in the same source table.
+  const exclMain = STATE.taskExcludeSameDay ? `
+    AND NOT EXISTS (
+      SELECT 1 FROM assignments a2
+      WHERE a2.code = a.code
+        AND substr(a2.assignment_date, 1, 10) = substr(a.assignment_date, 1, 10)
+        AND a2.match_id <> a.match_id
+        AND a2.assignment_date BETWEEN ?1 AND ?2
+    )` : '';
+  const exclPlayers = STATE.taskExcludeSameDay ? `
+    AND NOT EXISTS (
+      SELECT 1 FROM players p2
+      WHERE p2.code = p.code
+        AND substr(p2.assignment_date, 1, 10) = substr(p.assignment_date, 1, 10)
+        AND p2.match_id <> p.match_id
+        AND p2.assignment_date BETWEEN ?1 AND ?2
+    )` : '';
+  const exclBc = STATE.taskExcludeSameDay ? `
+    AND NOT EXISTS (
+      SELECT 1 FROM bc_review b2
+      WHERE b2.code = b.code
+        AND substr(b2.assignment_date, 1, 10) = substr(b.assignment_date, 1, 10)
+        AND b2.match_id <> b.match_id
+        AND b2.assignment_date BETWEEN ?1 AND ?2
+    )` : '';
+
+  // Per-unit actual times — one row per unit for stats (avg/median/min)
+  const mainUnits = (await query(`
+    SELECT a.task AS task,
+           SUM(${ruleActualExpr('a','dl')}) AS actual
+    FROM assignments a
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+      AND a.task IS NOT NULL AND a.task <> ''
+      ${efA.sql}
+      ${exclMain}
+    GROUP BY a.task, a.match_id, a.code, a.half, a.side
   `, [start, end, like, ...efA.args])).rows;
-  const avgByTask = {};
-  avgRows.forEach(r => { avgByTask[r.task] = r.avg_actual; });
 
-  // Merge avg into summary
-  summary.forEach(t => { t.avg_actual = avgByTask[t.task] ?? null; });
+  // Players — unit = (match_id, code, side). Actual per side.
+  const playersUnits = (await query(`
+    SELECT p.task AS task,
+      CASE
+        WHEN (SELECT COUNT(*) FROM players pp
+              WHERE pp.match_id = p.match_id AND pp.code = p.code) >= 2
+        THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) / 2.0
+        ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0)
+      END AS actual
+    FROM players p
+    WHERE p.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclPlayers}
+  `, [start, end, ...ef.args])).rows;
 
-  // Top charts
+  // BC — unit = (match_id, code, half=partid). Actual per partid.
+  const bcUnits = (await query(`
+    SELECT b.task AS task,
+      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                WHERE dl.matchid = b.match_id AND dl.code = b.code
+                  AND dl.partid = CASE WHEN b.half = '1st' THEN '1'
+                                       WHEN b.half = '2nd' THEN '2' ELSE '0' END), 0) AS actual
+    FROM bc_review b
+    WHERE b.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclBc}
+  `, [start, end, ...ef.args])).rows;
+
+  // Group by task → array of actuals for stat computation
+  const actualsByTask = {};
+  [...mainUnits, ...playersUnits, ...bcUnits].forEach(r => {
+    const v = parseFloat(r.actual);
+    if (isNaN(v) || v <= 0) return;
+    (actualsByTask[r.task] = actualsByTask[r.task] || []).push(v);
+  });
+
+  function statsOf(arr) {
+    if (!arr || !arr.length) return { n: 0, avg: null, median: null, min: null, max: null };
+    const s = arr.slice().sort((a, b) => a - b);
+    const n = s.length;
+    const avg = s.reduce((a, b) => a + b, 0) / n;
+    const median = n % 2 ? s[(n-1)/2] : (s[n/2 - 1] + s[n/2]) / 2;
+    return { n, avg, median, min: s[0], max: s[n-1] };
+  }
+  const statsByTask = {};
+  Object.keys(actualsByTask).forEach(t => { statsByTask[t] = statsOf(actualsByTask[t]); });
+
+  // Fetch expected minutes for every task shown
+  const taskNames = summary.map(t => t.task);
+  const expByTask = {};
+  if (taskNames.length) {
+    const ph = taskNames.map((_, i) => '?' + (i + 1)).join(',');
+    const { rows } = await query(
+      `SELECT task, expected_minutes FROM productivity_config WHERE task IN (${ph})`,
+      taskNames
+    );
+    rows.forEach(r => { expByTask[r.task] = parseFloat(r.expected_minutes) || 0; });
+  }
+
+  // Merge stats + expected into summary
+  summary.forEach(t => {
+    const s = statsByTask[t.task] || { n: 0, avg: null, median: null, min: null };
+    t.avg_actual = s.avg;
+    t.median_actual = s.median;
+    t.min_actual = s.min;
+    t.n = s.n;
+    t.expected = expByTask[t.task] ?? null;
+    t.diff_avg    = (t.avg_actual    != null && t.expected != null) ? t.avg_actual    - t.expected : null;
+    t.diff_median = (t.median_actual != null && t.expected != null) ? t.median_actual - t.expected : null;
+  });
+  summary.sort((a, b) => (b.assignments || 0) - (a.assignments || 0));
+  const avgByTask = {}; summary.forEach(t => { avgByTask[t.task] = t.avg_actual; });
+
+  // Top charts — one for avg, one for median
   bar('chartTaskCount', summary.map(t => t.task), summary.map(t => t.assignments), 'Total assignments');
   const withAvg = summary.filter(t => t.avg_actual != null);
-  bar('chartTaskAvg', withAvg.map(t => t.task), withAvg.map(t => round1(t.avg_actual)), 'Avg review time (min)');
+  const canvas = document.getElementById('chartTaskAvg');
+  if (canvas) {
+    if (canvas._chart) canvas._chart.destroy();
+    canvas._chart = new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: withAvg.map(t => t.task),
+        datasets: [
+          { label: 'Average (min)', data: withAvg.map(t => round1(t.avg_actual)),    backgroundColor: css('--accent') || '#4a9eff' },
+          { label: 'Median (min)',  data: withAvg.map(t => round1(t.median_actual)), backgroundColor: css('--pos')    || '#4caf50' },
+          { label: 'Expected (min)',data: withAvg.map(t => round1(t.expected || 0)), backgroundColor: 'rgba(255,152,0,.5)' },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } },
+    });
+  }
 
   const grid = document.getElementById('taskGrid');
   if (!summary.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:1/-1">No tasks in this range.</div>';
     return;
   }
-  grid.innerHTML = summary.map(t => `
+  // Card shows 4 top stats + per-stat rows: median | avg | diff (both) | expected
+  grid.innerHTML = summary.map(t => {
+    function diffCell(v) {
+      if (v == null) return '—';
+      const cls = v > 0 ? 'color:var(--pos,#4caf50)' : v < 0 ? 'color:var(--neg,#f66)' : '';
+      return `<span style="${cls};font-weight:600;">${v > 0 ? '+' : ''}${fmt(v)}</span>`;
+    }
+    return `
     <div class="task-card" data-task="${esc(t.task)}">
       <div class="task-card-head">
         <div class="task-card-name">${esc(t.task)}</div>
@@ -814,19 +950,41 @@ async function loadTasks(R) {
           <div class="task-card-stat-value">${fmt(t.distinct_matches)}</div>
         </div>
         <div class="task-card-stat">
-          <div class="task-card-stat-label">Avg time (min)</div>
-          <div class="task-card-stat-value">${t.avg_actual != null ? fmt(t.avg_actual) : '—'}</div>
+          <div class="task-card-stat-label">Expected (min)</div>
+          <div class="task-card-stat-value">${t.expected != null ? fmt(t.expected) : '—'}</div>
         </div>
         <div class="task-card-stat">
-          <div class="task-card-stat-label">Top month</div>
-          <div class="task-card-stat-value">${esc(monthLabel(t.top_month) || '—')}</div>
+          <div class="task-card-stat-label">Min actual</div>
+          <div class="task-card-stat-value">${t.min_actual != null ? fmt(t.min_actual) : '—'}</div>
         </div>
       </div>
+      <table style="width:100%;margin-top:8px;font-size:12px;border-collapse:collapse;">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border,#333);">
+            <th style="text-align:left;padding:4px;">Metric</th>
+            <th style="text-align:right;padding:4px;">Value (min)</th>
+            <th style="text-align:right;padding:4px;">Δ Expected</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="padding:4px;">Median</td>
+            <td style="text-align:right;padding:4px;font-weight:600;">${t.median_actual != null ? fmt(t.median_actual) : '—'}</td>
+            <td style="text-align:right;padding:4px;">${diffCell(t.diff_median)}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px;">Average</td>
+            <td style="text-align:right;padding:4px;font-weight:600;">${t.avg_actual != null ? fmt(t.avg_actual) : '—'}</td>
+            <td style="text-align:right;padding:4px;">${diffCell(t.diff_avg)}</td>
+          </tr>
+        </tbody>
+      </table>
       <div class="task-card-detail">
         <div class="chart-wrap short" style="margin-top:8px"><canvas id="fullTaskChart_${esc(t.task).replace(/\W/g,'_')}"></canvas></div>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   // Trend = avg review time per (task, time-bucket), computed as
   // AVG(match_total) — one match_total per (match_id, code).
@@ -1302,6 +1460,10 @@ document.getElementById('taskGranSeg').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   STATE.taskGran = b.dataset.gran;
   document.querySelectorAll('#taskGranSeg button').forEach(x => x.classList.toggle('active', x === b));
+  if (STATE.view === 'tasks') refresh();
+});
+document.getElementById('taskExcludeSameDay').addEventListener('change', e => {
+  STATE.taskExcludeSameDay = e.target.checked;
   if (STATE.view === 'tasks') refresh();
 });
 
