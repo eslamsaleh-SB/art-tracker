@@ -32,6 +32,185 @@ function esc(v) {
   if (v == null) return '';
   return String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
+
+// ============================================================
+// Comments — shared across 5 views: nologs, partial, players_nologs,
+// bc_nologs, players_partial. Each view has its own DB table.
+// ============================================================
+const COMMENT_AUTHORS = ['Ehab Ashraf','Mohamed Mokhtar','Mohamed Mohsen','Sherif Badawy','Omar Alaa'];
+const COMMENT_STATUSES = ['', 'approved', 'investigation'];
+const VIEW_TO_COMMENT_TABLE = {
+  nologs: 'comments_nologs',
+  partial: 'comments_partial',
+  players_nologs: 'comments_players_nologs',
+  bc_nologs: 'comments_bc_nologs',
+  players_partial: 'comments_players_partial',
+};
+const COMMENTS = { byTable: {}, filter: { hasComment: 'all', author: '', status: '' } };
+
+function getAdminToken() {
+  return localStorage.getItem('adminToken') || '';
+}
+function setAdminToken(t) {
+  if (t) localStorage.setItem('adminToken', t);
+}
+// Build a stable row-key for any row shape. Order-sensitive.
+function rowKey(row, keys) {
+  return keys.map(k => String(row[k] == null ? '' : row[k]).trim()).join('|');
+}
+async function loadCommentsFor(table) {
+  const { rows } = await query(`SELECT row_key, author, comment, status, created_at, updated_at
+                                FROM ${table}`);
+  const map = {};
+  rows.forEach(r => { map[r.row_key] = r; });
+  COMMENTS.byTable[table] = map;
+  return map;
+}
+async function saveComment(table, row_key, row_data, author, comment, status) {
+  const token = getAdminToken();
+  if (!token) { alert('Admin token missing — open the Import CSV tab, paste your token, then reload.'); return null; }
+  const r = await fetch('/api/comment', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    body: JSON.stringify({ table, row_key, row_data, author, comment, status }),
+  });
+  if (!r.ok) { alert('Save failed: ' + await r.text()); return null; }
+  const j = await r.json();
+  // Update local cache
+  COMMENTS.byTable[table] = COMMENTS.byTable[table] || {};
+  COMMENTS.byTable[table][row_key] = {
+    row_key, author, comment, status,
+    created_at: (COMMENTS.byTable[table][row_key]?.created_at) || j.updated_at,
+    updated_at: j.updated_at,
+  };
+  return j;
+}
+async function deleteComment(table, row_key) {
+  const token = getAdminToken();
+  if (!token) { alert('Admin token missing.'); return null; }
+  const r = await fetch('/api/comment/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    body: JSON.stringify({ table, row_key }),
+  });
+  if (!r.ok) { alert('Delete failed'); return null; }
+  if (COMMENTS.byTable[table]) delete COMMENTS.byTable[table][row_key];
+  return true;
+}
+
+// Modal — open for a specific row. Shared DOM.
+function openCommentModal(table, row_key, row_data, refreshFn) {
+  const existing = (COMMENTS.byTable[table] || {})[row_key] || {};
+  document.getElementById('cmModalTitle').textContent = existing.comment ? 'Edit comment' : 'Add comment';
+  document.getElementById('cmModalRowKey').textContent = row_key;
+  const authorSel = document.getElementById('cmAuthor');
+  authorSel.innerHTML = '<option value="">-- select --</option>' +
+    COMMENT_AUTHORS.map(a => `<option value="${esc(a)}"${a===existing.author?' selected':''}>${esc(a)}</option>`).join('');
+  const statusSel = document.getElementById('cmStatus');
+  statusSel.innerHTML = COMMENT_STATUSES.map(s =>
+    `<option value="${s}"${s===(existing.status||'')?' selected':''}>${s || '(none)'}</option>`).join('');
+  document.getElementById('cmText').value = existing.comment || '';
+  document.getElementById('cmMeta').textContent = existing.updated_at
+    ? `Last edit: ${existing.updated_at.slice(0,19).replace('T',' ')} by ${existing.author || '—'}`
+    : 'New comment';
+
+  const saveBtn = document.getElementById('cmSave');
+  const delBtn  = document.getElementById('cmDelete');
+  const closeBtn= document.getElementById('cmClose');
+  delBtn.style.display = existing.comment ? 'inline-block' : 'none';
+
+  saveBtn.onclick = async () => {
+    const author = authorSel.value;
+    const status = statusSel.value;
+    const text = document.getElementById('cmText').value.trim();
+    if (!author) { alert('Pick a name'); return; }
+    if (!text)   { alert('Write a comment'); return; }
+    saveBtn.disabled = true;
+    await saveComment(table, row_key, row_data, author, text, status);
+    saveBtn.disabled = false;
+    document.getElementById('cmModal').style.display = 'none';
+    if (refreshFn) refreshFn();
+  };
+  delBtn.onclick = async () => {
+    if (!confirm('Delete this comment?')) return;
+    await deleteComment(table, row_key);
+    document.getElementById('cmModal').style.display = 'none';
+    if (refreshFn) refreshFn();
+  };
+  closeBtn.onclick = () => { document.getElementById('cmModal').style.display = 'none'; };
+
+  document.getElementById('cmModal').style.display = 'flex';
+}
+
+// Attach comment column + apply filter. Returns { cols, filteredRows }.
+function withComments(table, cols, rows, keyFields, refreshFn) {
+  const cache = COMMENTS.byTable[table] || {};
+  // Attach row_key + comment ref to each row
+  const enriched = rows.map(r => {
+    const rk = rowKey(r, keyFields);
+    return { ...r, _rk: rk, _cm: cache[rk] || null };
+  });
+  // Apply comment filters
+  const f = COMMENTS.filter;
+  const filtered = enriched.filter(r => {
+    if (f.hasComment === 'yes' && !r._cm) return false;
+    if (f.hasComment === 'no'  &&  r._cm) return false;
+    if (f.author && (!r._cm || r._cm.author !== f.author)) return false;
+    if (f.status && (!r._cm || (r._cm.status || '') !== f.status)) return false;
+    return true;
+  });
+  const newCols = cols.concat([{
+    key: '_comment', label: 'Comment', raw: true,
+    render: (r) => {
+      const c = r._cm;
+      if (!c) return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}">+ add</button>`;
+      const badge = c.status === 'approved' ? '<span style="color:#4caf50">●</span>'
+                  : c.status === 'investigation' ? '<span style="color:#ff9800">●</span>' : '';
+      const snippet = esc((c.comment || '').slice(0, 60));
+      return `<button class="btn-icon cm-btn" data-tbl="${table}" data-rk="${esc(r._rk)}" title="${esc(c.comment || '')}">${badge} ${esc(c.author || '?')}: ${snippet}${c.comment && c.comment.length > 60 ? '…' : ''}</button>`;
+    }
+  }]);
+  // Delegate click on cm-btn to open modal (attach once per render)
+  setTimeout(() => {
+    document.querySelectorAll('.cm-btn').forEach(btn => {
+      btn.onclick = () => {
+        const rk = btn.getAttribute('data-rk');
+        const tbl = btn.getAttribute('data-tbl');
+        const rowData = (filtered.find(x => x._rk === rk)) || {};
+        openCommentModal(tbl, rk, rowData, refreshFn);
+      };
+    });
+  }, 0);
+  return { cols: newCols, rows: filtered };
+}
+
+// Render standard comment-filter bar. Call once per view when it mounts.
+function renderCommentFilterBar(containerId, onChange) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `
+    <select id="${containerId}_has" class="ctrl">
+      <option value="all">All rows</option>
+      <option value="yes">With comment</option>
+      <option value="no">Without comment</option>
+    </select>
+    <select id="${containerId}_author" class="ctrl">
+      <option value="">Any author</option>
+      ${COMMENT_AUTHORS.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}
+    </select>
+    <select id="${containerId}_status" class="ctrl">
+      <option value="">Any status</option>
+      <option value="approved">Approved</option>
+      <option value="investigation">Investigation</option>
+    </select>
+  `;
+  document.getElementById(containerId + '_has').value = COMMENTS.filter.hasComment;
+  document.getElementById(containerId + '_author').value = COMMENTS.filter.author;
+  document.getElementById(containerId + '_status').value = COMMENTS.filter.status;
+  document.getElementById(containerId + '_has').onchange    = e => { COMMENTS.filter.hasComment = e.target.value; onChange(); };
+  document.getElementById(containerId + '_author').onchange = e => { COMMENTS.filter.author     = e.target.value; onChange(); };
+  document.getElementById(containerId + '_status').onchange = e => { COMMENTS.filter.status     = e.target.value; onChange(); };
+}
 function round1(n) { return typeof n === 'number' ? Math.round(n * 10) / 10 : n; }
 function fmt(n) {
   if (n == null || n === '') return '—';
@@ -1467,8 +1646,12 @@ async function loadExtraNoLogs(R, opt) {
   `, args)).rows;
   // Rename for existing renderer
   rows.forEach(r => { r.reviewer_name = r.resolved_reviewer; r.team = r.resolved_team; });
-  document.getElementById(opt.countId).textContent = rows.length + ' rows';
-  renderTable(opt.tblId, [
+  // Comments — different table per view
+  const TBL = opt.table === 'players' ? 'comments_players_nologs' : 'comments_bc_nologs';
+  const FID = opt.table === 'players' ? 'cmFilter_players_nologs' : 'cmFilter_bc_nologs';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar(FID, () => loadExtraNoLogs(R, opt));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'task',            label:'Task' },
@@ -1477,7 +1660,11 @@ async function loadExtraNoLogs(R, opt) {
     { key:'code',            label:'Code' },
     { key:'reviewer_name',   label:'Reviewer' },
     { key:'team',            label:'Team' },
-  ], rows);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, rows,
+    ['match_id','code','task','half','side'], () => loadExtraNoLogs(R, opt));
+  document.getElementById(opt.countId).textContent = fr.length + ' rows';
+  renderTable(opt.tblId, cols, fr);
 }
 
 // LEGACY — no longer used, kept as reference stub
@@ -1620,8 +1807,10 @@ async function loadNoLogs(R) {
     ORDER BY a.assignment_date DESC
     LIMIT 2000
   `, [start, end, like, ...ef.args]);
-  document.getElementById('nologsCount').textContent = rows.length + ' rows';
-  renderTable('tblNoLogs', [
+  const TBL = 'comments_nologs';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar('cmFilter_nologs', () => loadNoLogs(R));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'competition',     label:'Competition' },
@@ -1633,7 +1822,11 @@ async function loadNoLogs(R) {
     { key:'code',            label:'Code' },
     { key:'reviewer_name',   label:'Reviewer' },
     { key:'team',            label:'Team' },
-  ], rows);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, rows,
+    ['match_id','code','task','half','side'], () => loadNoLogs(R));
+  document.getElementById('nologsCount').textContent = fr.length + ' rows';
+  renderTable('tblNoLogs', cols, fr);
 }
 
 // ============================================================
@@ -1669,8 +1862,10 @@ async function loadPartial(R) {
     ORDER BY a.assignment_date DESC
     LIMIT 2000
   `, [start, end, like, ...ef.args]);
-  document.getElementById('partialCount').textContent = rows.length + ' rows';
-  renderTable('tblPartial', [
+  const TBL = 'comments_partial';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar('cmFilter_partial', () => loadPartial(R));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'competition',     label:'Competition' },
@@ -1684,7 +1879,11 @@ async function loadPartial(R) {
     { key:'missing',         label:'Missing half' },
     { key:'logs_1st',        label:'Logs 1st', num:true },
     { key:'logs_2nd',        label:'Logs 2nd', num:true },
-  ], rows);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, rows,
+    ['match_id','code','task','side'], () => loadPartial(R));
+  document.getElementById('partialCount').textContent = fr.length + ' rows';
+  renderTable('tblPartial', cols, fr);
 }
 
 // ============================================================
@@ -1759,8 +1958,10 @@ async function loadPlayersPartial(R) {
     LIMIT 2000
   `, args);
   rows.forEach(r => { r.reviewer_name = r.resolved_reviewer; r.team = r.resolved_team; });
-  document.getElementById('playersPartialCount').textContent = rows.length + ' rows';
-  renderTable('tblPlayersPartial', [
+  const TBL = 'comments_players_partial';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar('cmFilter_players_partial', () => loadPlayersPartial(R));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'competition',     label:'Competition' },
@@ -1774,7 +1975,11 @@ async function loadPlayersPartial(R) {
     { key:'missing',         label:'Missing half' },
     { key:'logs_1st',        label:'Logs 1st', num:true },
     { key:'logs_2nd',        label:'Logs 2nd', num:true },
-  ], rows);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, rows,
+    ['match_id','code','task','side'], () => loadPlayersPartial(R));
+  document.getElementById('playersPartialCount').textContent = fr.length + ' rows';
+  renderTable('tblPlayersPartial', cols, fr);
 }
 
 // ============================================================
@@ -1959,6 +2164,7 @@ function impLog(msg, cls) {
 async function runImport() {
   const tableName = document.getElementById('impTable').value;
   const token = document.getElementById('impToken').value.trim();
+  if (token) setAdminToken(token);
   const fileInput = document.getElementById('impFile');
   const cfg = IMPORT_CONFIG[tableName];
   if (!token) { impLog('Missing admin token.', 'err'); return; }
@@ -2068,6 +2274,7 @@ async function runImport() {
 async function wipeTable() {
   const tableName = document.getElementById('impTable').value;
   const token = document.getElementById('impToken').value.trim();
+  if (token) setAdminToken(token);
   if (!token) { impLog('Missing admin token.', 'err'); return; }
   if (!confirm('DELETE all rows from ' + tableName + '?')) return;
   const r = await fetch('/api/import', {
@@ -2080,6 +2287,12 @@ async function wipeTable() {
 }
 
 document.getElementById('impStart').addEventListener('click', () => runImport().catch(e => impLog(e.message, 'err')));
+// Auto-fill token from localStorage on page load
+(() => {
+  const t = getAdminToken();
+  const inp = document.getElementById('impToken');
+  if (t && inp && !inp.value) inp.value = t;
+})();
 document.getElementById('impClear').addEventListener('click', () => wipeTable().catch(e => impLog(e.message, 'err')));
 
 // Initial load

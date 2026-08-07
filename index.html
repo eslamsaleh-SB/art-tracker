@@ -433,6 +433,7 @@
           <div class="panel-sub">Only shown when assignment date ≤ latest <code>review_started</code> in logs — recent unlogged assignments hidden.</div>
         </div>
         <div class="panel-actions">
+          <div class="cmFilter" id="cmFilter_nologs" style="display:inline-flex;gap:6px;"></div>
           <span class="chip" id="nologsCount">0</span>
           <button class="btn-icon" data-export="tblNoLogs">Export CSV</button>
         </div>
@@ -450,6 +451,7 @@
           <div class="panel-sub">Rows in <code>players</code> that have no matching entry in <code>data_logs</code>.</div>
         </div>
         <div class="panel-actions">
+          <div class="cmFilter" id="cmFilter_players_nologs" style="display:inline-flex;gap:6px;"></div>
           <span class="chip" id="playersNoLogsCount">0</span>
           <button class="btn-icon" data-export="tblPlayersNoLogs">Export CSV</button>
         </div>
@@ -467,6 +469,7 @@
           <div class="panel-sub">Rows in <code>bc_review</code> that have no matching entry in <code>data_logs</code>.</div>
         </div>
         <div class="panel-actions">
+          <div class="cmFilter" id="cmFilter_bc_nologs" style="display:inline-flex;gap:6px;"></div>
           <span class="chip" id="bcNoLogsCount">0</span>
           <button class="btn-icon" data-export="tblBcNoLogs">Export CSV</button>
         </div>
@@ -484,6 +487,7 @@
           <div class="panel-sub">Assignments with <code>half = Both</code> where logs exist for only ONE half (1st or 2nd), not both.</div>
         </div>
         <div class="panel-actions">
+          <div class="cmFilter" id="cmFilter_partial" style="display:inline-flex;gap:6px;"></div>
           <span class="chip" id="partialCount">0</span>
           <button class="btn-icon" data-export="tblPartial">Export CSV</button>
         </div>
@@ -501,6 +505,7 @@
           <div class="panel-sub">Players assignments where logs exist for only ONE half (partid 1 or 2), not both.</div>
         </div>
         <div class="panel-actions">
+          <div class="cmFilter" id="cmFilter_players_partial" style="display:inline-flex;gap:6px;"></div>
           <span class="chip" id="playersPartialCount">0</span>
           <button class="btn-icon" data-export="tblPlayersPartial">Export CSV</button>
         </div>
@@ -608,5 +613,27 @@
 </main>
 
 <script src="/app.js"></script>
+<!-- Comment modal (shared) -->
+<div id="cmModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-elev,#1e1e1e);color:var(--text,#e0e0e0);padding:20px;border-radius:10px;min-width:420px;max-width:640px;box-shadow:0 12px 40px rgba(0,0,0,.5);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 id="cmModalTitle" style="margin:0;">Comment</h3>
+      <button id="cmClose" class="btn-icon">✕</button>
+    </div>
+    <div id="cmModalRowKey" style="font-size:11px;color:var(--text-dim);margin-bottom:12px;word-break:break-all;"></div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <label style="flex:1;">Name<br><select id="cmAuthor" style="width:100%;padding:6px;"></select></label>
+      <label style="flex:1;">Status<br><select id="cmStatus" style="width:100%;padding:6px;"></select></label>
+    </div>
+    <label>Comment<br>
+      <textarea id="cmText" rows="4" style="width:100%;padding:6px;box-sizing:border-box;"></textarea>
+    </label>
+    <div id="cmMeta" style="font-size:11px;color:var(--text-dim);margin-top:8px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button id="cmDelete" class="btn-icon" style="color:#f66;">Delete</button>
+      <button id="cmSave" class="btn-icon" style="background:var(--accent,#4a9eff);color:white;">Save</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
