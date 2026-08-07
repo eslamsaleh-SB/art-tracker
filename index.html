@@ -253,6 +253,7 @@
     <button class="nav-item" data-view="rows"><span class="ico">≡</span><span>Assignments</span></button>
     <button class="nav-item" data-view="players"><span class="ico">◆</span><span>Players</span></button>
     <button class="nav-item" data-view="players_nologs" style="padding-left:28px;font-size:12px;"><span class="ico">✖</span><span>No Logs</span></button>
+    <button class="nav-item" data-view="players_partial" style="padding-left:28px;font-size:12px;"><span class="ico">◐</span><span>Partial Cover</span></button>
     <button class="nav-item" data-view="bc"><span class="ico">◇</span><span>B - C Review</span></button>
     <button class="nav-item" data-view="bc_nologs" style="padding-left:28px;font-size:12px;"><span class="ico">✖</span><span>No Logs</span></button>
     <button class="nav-item" data-view="nologs"><span class="ico">✖</span><span>No Logs</span></button>
@@ -488,6 +489,23 @@
         </div>
       </div>
       <div class="table-wrap"><table id="tblPartial"></table></div>
+    </div>
+  </section>
+
+  <!-- PLAYERS PARTIAL COVERAGE -->
+  <section id="view-players_partial" class="view hidden">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <h3 class="panel-title">Players — partial coverage</h3>
+          <div class="panel-sub">Players assignments where logs exist for only ONE half (partid 1 or 2), not both.</div>
+        </div>
+        <div class="panel-actions">
+          <span class="chip" id="playersPartialCount">0</span>
+          <button class="btn-icon" data-export="tblPlayersPartial">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblPlayersPartial"></table></div>
     </div>
   </section>
 

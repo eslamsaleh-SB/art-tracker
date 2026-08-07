@@ -317,6 +317,7 @@ function setView(name) {
     rows: 'Assignments',
     players: 'Players', bc: 'B - C Review',
     players_nologs: 'Players — No Logs', bc_nologs: 'B - C — No Logs',
+    players_partial: 'Players — Partial Coverage',
     nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
   }[name] || name;
@@ -435,7 +436,8 @@ async function refresh(opts) {
       tblReviewer: 'tblBcReviewer', tblRows: 'tblBcRows', countId: 'bcRowsCount',
     });
     if (STATE.view === 'nologs')    await loadNoLogs(R);
-    if (STATE.view === 'partial')   await loadPartial(R);
+    if (STATE.view === 'partial')          await loadPartial(R);
+    if (STATE.view === 'players_partial')  await loadPlayersPartial(R);
     if (STATE.view === 'hours')     await loadHours(R);
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
@@ -1669,6 +1671,96 @@ async function loadPartial(R) {
   `, [start, end, like, ...ef.args]);
   document.getElementById('partialCount').textContent = rows.length + ' rows';
   renderTable('tblPartial', [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
+    { key:'competition',     label:'Competition' },
+    { key:'home_team',       label:'Home' },
+    { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+    { key:'missing',         label:'Missing half' },
+    { key:'logs_1st',        label:'Logs 1st', num:true },
+    { key:'logs_2nd',        label:'Logs 2nd', num:true },
+  ], rows);
+}
+
+// ============================================================
+// Players — partial coverage. Players rows where data_logs have
+// only partid=1 OR only partid=2 (not both). Same 1-side reviewers
+// (Home OR Away only) don't count as partial — that's expected.
+// ============================================================
+async function loadPlayersPartial(R) {
+  const start = R.start, end = R.end;
+  const like  = STATE.q ? '%' + STATE.q + '%' : '';
+  const args  = [start, end, like];
+  let n = 4;
+  const teamFilters = [];
+  if (STATE.teams && STATE.teams.length) {
+    const ph = STATE.teams.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`resolved_team IN (${ph})`);
+    args.push(...STATE.teams);
+  }
+  if (STATE.teamsExclude && STATE.teamsExclude.length) {
+    const ph = STATE.teamsExclude.map(() => '?' + (n++)).join(',');
+    teamFilters.push(`resolved_team NOT IN (${ph})`);
+    args.push(...STATE.teamsExclude);
+  }
+  if (STATE.reviewer) { teamFilters.push(`resolved_reviewer = ?${n++}`); args.push(STATE.reviewer); }
+  if (STATE.code)     { teamFilters.push(`code = ?${n++}`);              args.push(STATE.code); }
+  const outerWhere = teamFilters.length ? 'AND ' + teamFilters.join(' AND ') : '';
+
+  const { rows } = await query(`
+    SELECT * FROM (
+      SELECT p.match_id, p.assignment_date,
+             (SELECT MAX(competition) FROM assignments WHERE match_id = p.match_id) AS competition,
+             (SELECT MAX(home_team)   FROM assignments WHERE match_id = p.match_id) AS home_team,
+             (SELECT MAX(away_team)   FROM assignments WHERE match_id = p.match_id) AS away_team,
+             p.task, p.side, p.code,
+             COALESCE(NULLIF(p.reviewer_name, ''),
+                      (SELECT reviewer_name FROM assignments WHERE code = p.code
+                         AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                         GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS resolved_reviewer,
+             COALESCE(NULLIF(p.team, ''),
+                      (SELECT team FROM assignments WHERE code = p.code
+                         AND team IS NOT NULL AND team <> ''
+                         GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1)) AS resolved_team,
+             (SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
+                WHERE dl.matchid = p.match_id AND dl.code = p.code) AS logs_1st,
+             (SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
+                WHERE dl.matchid = p.match_id AND dl.code = p.code) AS logs_2nd,
+             CASE
+               WHEN (SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code) > 0
+                AND COALESCE((SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) = 0
+               THEN 'Missing 2nd'
+               WHEN COALESCE((SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) = 0
+                AND (SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code) > 0
+               THEN 'Missing 1st'
+               ELSE 'ok'
+             END AS missing
+      FROM players p
+      WHERE p.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
+        AND p.code IS NOT NULL AND p.code <> ''
+        AND substr(p.assignment_date, 1, 10) <= COALESCE(
+          (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+          '2999-12-31'
+        )
+    )
+    WHERE missing IN ('Missing 1st', 'Missing 2nd')
+      ${outerWhere}
+    ORDER BY assignment_date DESC, match_id DESC
+    LIMIT 2000
+  `, args);
+  rows.forEach(r => { r.reviewer_name = r.resolved_reviewer; r.team = r.resolved_team; });
+  document.getElementById('playersPartialCount').textContent = rows.length + ' rows';
+  renderTable('tblPlayersPartial', [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'competition',     label:'Competition' },
