@@ -1403,6 +1403,8 @@ async function loadExtraNoLogs(R, opt) {
     FROM ${opt.table} p
     WHERE p.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
+      -- Skip malformed rows w/ no reviewer code (they can't possibly log work)
+      AND p.code IS NOT NULL AND p.code <> ''
       AND NOT EXISTS (
         SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
       )
@@ -1693,7 +1695,6 @@ const IMPORT_CONFIG = {
     aliases: {},
   },
   players: {
-    // Source cols: match_id, Side, code, review_date
     dbCols: ['match_id','code','task','half','side','reviewer_name','team',
              'competition','home_team','away_team','assignment_date','app'],
     aliases: {
@@ -1701,9 +1702,9 @@ const IMPORT_CONFIG = {
       assignment_date: 'review_date',
     },
     constants: { task: 'Players New Players', half: 'Both', app: 'tornado' },
+    requiredCols: ['match_id', 'code'],
   },
   bc_review: {
-    // Source cols: Match ID, part id, Review Date, Reviewer Name, Reviewer Code
     dbCols: ['match_id','code','task','half','side','reviewer_name','team',
              'competition','home_team','away_team','assignment_date','app'],
     aliases: {
@@ -1722,6 +1723,7 @@ const IMPORT_CONFIG = {
         return s;
       },
     },
+    requiredCols: ['match_id', 'code'],
   },
 };
 function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
@@ -1819,7 +1821,7 @@ async function runImport() {
   const file = fileInput.files[0];
   impLog('Reading ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)…');
   const text = await file.text();
-  const rows = parseCSV(text);
+  let rows = parseCSV(text);
   if (rows.length < 2) { impLog('CSV has no data rows.', 'err'); return; }
 
   const header = rows.shift().map(h => String(h || '').trim());
@@ -1847,6 +1849,23 @@ async function runImport() {
   const qMarks  = cfg.dbCols.map(() => '?').join(',');
   // INSERT OR IGNORE: same PK → skip. Prevents overwrites on repeat uploads.
   const sql = `INSERT OR IGNORE INTO ${tableName} (${colList}) VALUES (${qMarks})`;
+
+  // Pre-filter: drop rows where any requiredCol is empty.
+  const requiredCols = cfg.requiredCols || [];
+  let skippedRequired = 0;
+  if (requiredCols.length) {
+    const before = rows.length;
+    rows = rows.filter(row => {
+      for (const c of requiredCols) {
+        const j = mapping[c];
+        const v = (j != null && j < row.length) ? String(row[j] || '').trim() : '';
+        if (!v) return false;
+      }
+      return true;
+    });
+    skippedRequired = before - rows.length;
+    if (skippedRequired) impLog(`Skipped ${skippedRequired} rows w/ missing required cols: ${requiredCols.join(', ')}`);
+  }
 
   const BATCH = 500;
   let pushed = 0, failed = 0;
