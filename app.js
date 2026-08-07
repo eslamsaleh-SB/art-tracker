@@ -1563,6 +1563,37 @@ const IMPORT_CONFIG = {
     dbCols: ['task','expected_minutes'],
     aliases: {},
   },
+  players: {
+    // Source cols: match_id, Side, code, review_date
+    dbCols: ['match_id','code','task','half','side','reviewer_name','team',
+             'competition','home_team','away_team','assignment_date','app'],
+    aliases: {
+      side: 'Side',
+      assignment_date: 'review_date',
+    },
+    constants: { task: 'Players New Players', half: 'Both', app: 'tornado' },
+  },
+  bc_review: {
+    // Source cols: Match ID, part id, Review Date, Reviewer Name, Reviewer Code
+    dbCols: ['match_id','code','task','half','side','reviewer_name','team',
+             'competition','home_team','away_team','assignment_date','app'],
+    aliases: {
+      match_id: 'Match ID',
+      code: 'Reviewer Code',
+      reviewer_name: 'Reviewer Name',
+      assignment_date: 'Review Date',
+      half: 'part id',
+    },
+    constants: { task: 'B - C Review', side: 'Both', app: 'tornado' },
+    valueTransforms: {
+      half: v => {
+        const s = String(v == null ? '' : v).trim();
+        if (s === '1') return '1st';
+        if (s === '2') return '2nd';
+        return s;
+      },
+    },
+  },
 };
 function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 
@@ -1674,11 +1705,17 @@ async function runImport() {
   const importTs = new Date().toISOString();
   for (let i = 0; i < rows.length; i += BATCH) {
     const slice = rows.slice(i, i + BATCH);
+    const constants  = cfg.constants || {};
+    const transforms = cfg.valueTransforms || {};
     const statements = slice.map(row => ({
       sql,
       args: cfg.dbCols.map(c => {
         const j = mapping[c];
         let v = (j != null && j < row.length) ? row[j] : '';
+        // Value transform (e.g. part id → 1st/2nd)
+        if (transforms[c]) v = transforms[c](v);
+        // Constant fill when CSV has no value for that col
+        if ((v === '' || v == null) && constants[c] != null) v = constants[c];
         // Normalize known date columns to ISO — fixes M/D/YYYY → YYYY-MM-DD.
         if (isDateColName(c)) v = normalizeDate(v);
         // Auto-fill last_modified when CSV doesn't provide it.
