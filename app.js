@@ -1237,24 +1237,31 @@ async function loadExtraTable(R, opt) {
     </div>
   `).join('');
 
-  // Reviewer breakdown
+  // Reviewer breakdown — JOIN assignments for name/team enrichment
   const revs = (await query(`
-    SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
+    SELECT p.code AS code,
+           COALESCE(NULLIF(MAX(p.reviewer_name), ''),
+                    (SELECT reviewer_name FROM assignments WHERE code = p.code
+                       AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                       GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS reviewer_name,
+           (SELECT team FROM assignments WHERE code = p.code
+              AND team IS NOT NULL AND team <> ''
+              GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team,
            COUNT(*) AS matches_listed,
-           COUNT(DISTINCT a.match_id) AS distinct_matches,
+           COUNT(DISTINCT p.match_id) AS distinct_matches,
            (SELECT AVG(match_total) FROM (
               SELECT a2.match_id, a2.code, a2.half, a2.side,
                      SUM(${ruleActualExpr('a2','dl2')}) AS match_total
               FROM ${table} a2
               JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.code = a2.code
-              WHERE a2.code = a.code
+              WHERE a2.code = p.code
                 AND a2.assignment_date BETWEEN ?1 AND ?2
               GROUP BY a2.match_id, a2.code, a2.half, a2.side
             )) AS avg_actual
-    FROM ${table} a
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.code LIKE ?3)
-    GROUP BY a.code, a.reviewer_name, a.team
+    FROM ${table} p
+    WHERE p.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.code LIKE ?3)
+    GROUP BY p.code
     ORDER BY matches_listed DESC
     LIMIT 500
   `, args)).rows;
@@ -1267,14 +1274,38 @@ async function loadExtraTable(R, opt) {
     { key:'avg_actual',       label:'Avg actual (min)', num:true },
   ], revs);
 
-  // Raw assignments list
+  // Raw assignments list — LEFT JOIN assignments to fill name/team/match info.
+  // COALESCE(source, assignments) prefers whatever the source CSV provided.
   const rows = (await query(`
-    SELECT match_id, assignment_date, competition, home_team, away_team,
-           task, half, side, code, reviewer_name, team
-    FROM ${table}
-    WHERE assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR code LIKE ?3)
-    ORDER BY assignment_date DESC, match_id DESC
+    SELECT p.match_id, p.assignment_date,
+           COALESCE(NULLIF(p.competition, ''), am.competition) AS competition,
+           COALESCE(NULLIF(p.home_team, ''),   am.home_team)   AS home_team,
+           COALESCE(NULLIF(p.away_team, ''),   am.away_team)   AS away_team,
+           p.task, p.half, p.side, p.code,
+           COALESCE(NULLIF(p.reviewer_name, ''), ac.reviewer_name) AS reviewer_name,
+           COALESCE(NULLIF(p.team, ''),          ac.team)          AS team
+    FROM ${table} p
+    LEFT JOIN (
+      SELECT code,
+             (SELECT reviewer_name FROM assignments WHERE code = a.code
+                AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1) AS reviewer_name,
+             (SELECT team FROM assignments WHERE code = a.code
+                AND team IS NOT NULL AND team <> ''
+                GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team
+      FROM assignments a WHERE code IS NOT NULL AND code <> '' GROUP BY code
+    ) ac ON ac.code = p.code
+    LEFT JOIN (
+      SELECT match_id,
+             MAX(competition) AS competition,
+             MAX(home_team) AS home_team,
+             MAX(away_team) AS away_team
+      FROM assignments WHERE match_id IS NOT NULL AND match_id <> '' GROUP BY match_id
+    ) am ON am.match_id = p.match_id
+    WHERE p.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3
+           OR ac.reviewer_name LIKE ?3 OR am.competition LIKE ?3)
+    ORDER BY p.assignment_date DESC, p.match_id DESC
     LIMIT 1000
   `, args)).rows;
   document.getElementById(opt.countId).textContent = rows.length + ' rows';
