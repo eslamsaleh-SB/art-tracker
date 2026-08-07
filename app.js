@@ -822,7 +822,7 @@ async function loadRows(R) {
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR home_team LIKE ?3 OR away_team LIKE ?3)
       AND substr(assignment_date, 1, 10) <= COALESCE(
-        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+        (SELECT MAX(review_date) FROM data_logs),
         '2999-12-31'
       )
       AND EXISTS (
@@ -1549,7 +1549,7 @@ async function loadNoLogs(R) {
   const ef = extraFilterSQL('a.');
   const { rows } = await query(`
     WITH cutoff AS (
-      SELECT substr(MAX(review_started), 1, 10) AS max_review FROM data_logs
+      SELECT MAX(review_date) AS max_review FROM data_logs
     )
     SELECT a.match_id, a.assignment_date, a.competition, a.home_team, a.away_team,
            a.task, a.half, a.side, a.code, a.reviewer_name, a.team
@@ -1640,8 +1640,8 @@ async function loadHours(R) {
   const ef = extraFilterSQL('a.');
 
   const bucketExpr = STATE.hoursGran === 'day'
-    ? `substr(dl.review_started, 1, 10)`
-    : `date(dl.review_started, 'weekday 0', '-7 days')`;   // Sunday start
+    ? `dl.review_date`
+    : `date(dl.review_date, 'weekday 0', '-7 days')`;   // Sunday start
 
   // JOIN data_logs to assignments to inherit team/reviewer filters
   const { rows } = await query(`
@@ -1687,8 +1687,18 @@ const IMPORT_CONFIG = {
   },
   data_logs: {
     dbCols: ['matchid','code','partid','full_name','review_started','review_ended',
-             'actual_time_taken','total_break_time','total_time_taken'],
+             'actual_time_taken','total_break_time','total_time_taken','review_date'],
     aliases: { code: 'hr_code' },
+    // Compute review_date (YYYY-MM-DD) from review_started so it's part of the PK
+    computedCols: {
+      review_date: (rowByCol) => {
+        const v = String(rowByCol('review_started') || '').trim();
+        if (!v) return '';
+        // Try normalized ISO/space; fall back to M/D/YYYY
+        const nrm = normalizeDate(v);
+        return (nrm || v).substr(0, 10);
+      },
+    },
   },
   productivity_config: {
     dbCols: ['task','expected_minutes'],
@@ -1875,22 +1885,31 @@ async function runImport() {
     const slice = rows.slice(i, i + BATCH);
     const constants  = cfg.constants || {};
     const transforms = cfg.valueTransforms || {};
-    const statements = slice.map(row => ({
-      sql,
-      args: cfg.dbCols.map(c => {
-        const j = mapping[c];
-        let v = (j != null && j < row.length) ? row[j] : '';
-        // Value transform (e.g. part id → 1st/2nd)
-        if (transforms[c]) v = transforms[c](v);
-        // Constant fill when CSV has no value for that col
-        if ((v === '' || v == null) && constants[c] != null) v = constants[c];
-        // Normalize known date columns to ISO — fixes M/D/YYYY → YYYY-MM-DD.
-        if (isDateColName(c)) v = normalizeDate(v);
-        // Auto-fill last_modified when CSV doesn't provide it.
-        if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
-        return v;
-      }),
-    }));
+    const computed   = cfg.computedCols || {};
+    const statements = slice.map(row => {
+      const rowByCol = (colName) => {
+        const jj = mapping[colName];
+        return (jj != null && jj < row.length) ? row[jj] : '';
+      };
+      return {
+        sql,
+        args: cfg.dbCols.map(c => {
+          const j = mapping[c];
+          let v = (j != null && j < row.length) ? row[j] : '';
+          // Value transform (e.g. part id → 1st/2nd)
+          if (transforms[c]) v = transforms[c](v);
+          // Constant fill when CSV has no value for that col
+          if ((v === '' || v == null) && constants[c] != null) v = constants[c];
+          // Computed col (e.g. review_date derived from review_started)
+          if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
+          // Normalize known date columns to ISO — fixes M/D/YYYY → YYYY-MM-DD.
+          if (isDateColName(c)) v = normalizeDate(v);
+          // Auto-fill last_modified when CSV doesn't provide it.
+          if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
+          return v;
+        }),
+      };
+    });
     try {
       const r = await fetch('/api/import', {
         method: 'POST',
