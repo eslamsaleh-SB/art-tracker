@@ -915,7 +915,6 @@ async function loadTasks(R) {
         datasets: [
           { label: 'Average (min)', data: withAvg.map(t => round1(t.avg_actual)),    backgroundColor: css('--accent') || '#4a9eff' },
           { label: 'Median (min)',  data: withAvg.map(t => round1(t.median_actual)), backgroundColor: css('--pos')    || '#4caf50' },
-          { label: 'Expected (min)',data: withAvg.map(t => round1(t.expected || 0)), backgroundColor: 'rgba(255,152,0,.5)' },
         ],
       },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } },
@@ -986,46 +985,82 @@ async function loadTasks(R) {
   `;
   }).join('');
 
-  // Trend = avg review time per (task, time-bucket), computed as
-  // AVG(match_total) — one match_total per (match_id, code).
-  const gexpr = granExpr('a.assignment_date', STATE.taskGran);
-  const trend = (await query(`
-    SELECT task, bucket, AVG(match_total) AS n
-    FROM (
-      SELECT a.task AS task, ${gexpr} AS bucket,
-             a.match_id AS match_id, a.code AS code,
-             SUM(${ruleActualExpr('a','dl')}) AS match_total
-      FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-      WHERE a.assignment_date BETWEEN ?1 AND ?2
-        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-        AND a.task IS NOT NULL AND a.task <> ''
-        ${efA.sql}
-      GROUP BY a.task, bucket, a.match_id, a.code, a.half, a.side
-    )
-    GROUP BY task, bucket
-    ORDER BY task, bucket
+  // Trend — return per-unit rows tagged (task, bucket, actual). JS computes
+  // avg + median per bucket. Covers main tasks + Players + BC.
+  const gexprA = granExpr('a.assignment_date', STATE.taskGran);
+  const gexprP = granExpr('p.assignment_date', STATE.taskGran);
+  const gexprB = granExpr('b.assignment_date', STATE.taskGran);
+
+  const trendMain = (await query(`
+    SELECT a.task AS task, ${gexprA} AS bucket,
+           SUM(${ruleActualExpr('a','dl')}) AS actual
+    FROM assignments a
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+      AND a.task IS NOT NULL AND a.task <> ''
+      ${efA.sql}
+      ${exclMain}
+    GROUP BY a.task, bucket, a.match_id, a.code, a.half, a.side
   `, [start, end, like, ...efA.args])).rows;
 
-  const bucketsSet = new Set();
-  trend.forEach(r => bucketsSet.add(r.bucket));
-  const buckets = Array.from(bucketsSet).sort();
-  const byTaskData = {};
-  trend.forEach(r => {
-    if (!byTaskData[r.task]) byTaskData[r.task] = {};
-    byTaskData[r.task][r.bucket] = r.n;
+  const trendPlayers = (await query(`
+    SELECT p.task AS task, ${gexprP} AS bucket,
+      CASE
+        WHEN (SELECT COUNT(*) FROM players pp
+              WHERE pp.match_id = p.match_id AND pp.code = p.code) >= 2
+        THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) / 2.0
+        ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0)
+      END AS actual
+    FROM players p
+    WHERE p.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclPlayers}
+  `, [start, end, ...ef.args])).rows;
+
+  const trendBc = (await query(`
+    SELECT b.task AS task, ${gexprB} AS bucket,
+      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                WHERE dl.matchid = b.match_id AND dl.code = b.code
+                  AND dl.partid = CASE WHEN b.half = '1st' THEN '1'
+                                       WHEN b.half = '2nd' THEN '2' ELSE '0' END), 0) AS actual
+    FROM bc_review b
+    WHERE b.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclBc}
+  `, [start, end, ...ef.args])).rows;
+
+  // Group per (task, bucket) → array of actuals
+  const trendMap = {}; // task -> bucket -> [actuals]
+  [...trendMain, ...trendPlayers, ...trendBc].forEach(r => {
+    const v = parseFloat(r.actual);
+    if (isNaN(v) || v <= 0) return;
+    if (!trendMap[r.task]) trendMap[r.task] = {};
+    if (!trendMap[r.task][r.bucket]) trendMap[r.task][r.bucket] = [];
+    trendMap[r.task][r.bucket].push(v);
   });
+
+  const bucketsSet = new Set();
+  Object.values(trendMap).forEach(m => Object.keys(m).forEach(b => bucketsSet.add(b)));
+  const buckets = Array.from(bucketsSet).sort();
   const labels = buckets.map(b => fmtBucket(b, STATE.taskGran));
+
+  function bucketStats(arr) {
+    if (!arr || !arr.length) return { avg: null, median: null };
+    const s = arr.slice().sort((a, b) => a - b);
+    const n = s.length;
+    const avg = s.reduce((a, b) => a + b, 0) / n;
+    const median = n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+    return { avg, median };
+  }
+
   summary.forEach(t => {
     const safe = t.task.replace(/\W/g, '_');
-    const dataArr = buckets.map(b => {
-      const v = byTaskData[t.task]?.[b];
-      return v != null ? round1(v) : null;
-    });
-    line('fullTaskChart_' + safe, labels,
-      [{ label: 'Avg review time (min)', data: dataArr, color: css('--accent') }],
-      { fill: true }
-    );
+    const perBucket = buckets.map(b => bucketStats(trendMap[t.task]?.[b] || []));
+    const avgArr    = perBucket.map(s => s.avg    != null ? round1(s.avg)    : null);
+    const medianArr = perBucket.map(s => s.median != null ? round1(s.median) : null);
+    line('fullTaskChart_' + safe, labels, [
+      { label: 'Average (min)', data: avgArr,    color: css('--accent') || '#4a9eff' },
+      { label: 'Median (min)',  data: medianArr, color: css('--pos')    || '#4caf50' },
+    ], { fill: false });
   });
 
   // Expand button wiring
