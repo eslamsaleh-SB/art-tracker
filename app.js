@@ -316,6 +316,7 @@ function setView(name) {
     overview: 'Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer',
     rows: 'Assignments',
     players: 'Players', bc: 'B - C Review',
+    players_nologs: 'Players — No Logs', bc_nologs: 'B - C — No Logs',
     nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
   }[name] || name;
@@ -421,6 +422,8 @@ async function refresh(opts) {
     if (STATE.view === 'tasks')     await loadTasks(R);
     if (STATE.view === 'reviewers') await loadReviewers(R);
     if (STATE.view === 'rows')      await loadRows(R);
+    if (STATE.view === 'players_nologs') await loadExtraNoLogs(R, { table: 'players',   tblId: 'tblPlayersNoLogs', countId: 'playersNoLogsCount' });
+    if (STATE.view === 'bc_nologs')      await loadExtraNoLogs(R, { table: 'bc_review', tblId: 'tblBcNoLogs',      countId: 'bcNoLogsCount' });
     if (STATE.view === 'players')   await loadExtraTable(R, {
       table: 'players', taskLabel: 'Players New Players',
       kpisId: 'playersKpis',
@@ -800,6 +803,19 @@ async function loadRows(R) {
   const start = R.start, end = R.end;
   const ef = extraFilterSQL('');
 
+  // Sub-query: other tasks reviewer worked on same date (Players / B-C).
+  const otherTasksExpr = `(
+    SELECT GROUP_CONCAT(DISTINCT t) FROM (
+      SELECT 'Players' AS t FROM players
+        WHERE code = assignments.code
+          AND substr(assignment_date, 1, 10) = substr(assignments.assignment_date, 1, 10)
+      UNION
+      SELECT 'B - C Review' FROM bc_review
+        WHERE code = assignments.code
+          AND substr(assignment_date, 1, 10) = substr(assignments.assignment_date, 1, 10)
+    )
+  )`;
+
   // Assignments in range, capped at the latest review_started in the logs.
   // Also do a COUNT(*) to drive pagination.
   const commonWhere = `
@@ -828,7 +844,8 @@ async function loadRows(R) {
 
   const arows = (await query(`
     SELECT match_id, assignment_date, competition, home_team, away_team,
-           code, reviewer_name, team, task, half, side
+           code, reviewer_name, team, task, half, side,
+           ${otherTasksExpr} AS other_tasks_same_day
     FROM assignments
     ${commonWhere}
     ORDER BY assignment_date DESC, match_id DESC
@@ -939,9 +956,14 @@ async function loadRows(R) {
     const base = expByTask[a.task];
     const expected = (base != null) ? base / scale : null;
     const diff = (expected != null) ? (actual - expected) : null;
-    const notes = lateDays.size
-      ? 'Additional logs after (' + Array.from(lateDays).sort((x,y)=>x-y).map(d => d + ' day' + (d===1?'':'s')).join(', ') + ')'
-      : '';
+    const noteParts = [];
+    if (lateDays.size) {
+      noteParts.push('Additional logs after (' + Array.from(lateDays).sort((x,y)=>x-y).map(d => d + ' day' + (d===1?'':'s')).join(', ') + ')');
+    }
+    if (a.other_tasks_same_day) {
+      noteParts.push('Same day also: ' + a.other_tasks_same_day);
+    }
+    const notes = noteParts.join(' · ');
 
     return {
       ...a,
@@ -1190,14 +1212,42 @@ try {
 } catch(_) {}
 
 // ============================================================
-// Extra table view — parameterized by (table name, DOM ids). One instance
-// for `players`, one for `bc_review`. Same layout, different SQL target.
+// Extra table view — parameterized by (table name, DOM ids, kind).
+// kind = 'players' → per-side actual (halve when reviewer has both sides)
+// kind = 'bc'      → per-part actual (specific partid)
 // ============================================================
 async function loadExtraTable(R, opt) {
   const table = opt.table;
+  const kind  = opt.kind || (table === 'players' ? 'players' : 'bc');
   const start = R.start, end = R.end;
   const like  = STATE.q ? '%' + STATE.q + '%' : '';
   const args  = [start, end, like];
+
+  // SQL fragment for actual time — parameterized by outer alias
+  function actualExprAs(a) {
+    if (kind === 'players') {
+      return `(
+        CASE
+          WHEN (SELECT COUNT(*) FROM ${table} pp
+                WHERE pp.match_id = ${a}.match_id AND pp.code = ${a}.code) >= 2
+          THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code), 0) / 2.0
+          ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code), 0)
+        END
+      )`;
+    }
+    return `(
+      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+                  AND dl.partid = CASE
+                    WHEN lower(${a}.half) = '1st' THEN '1'
+                    WHEN lower(${a}.half) = '2nd' THEN '2'
+                    ELSE '0' END), 0)
+    )`;
+  }
+  const actualExpr = actualExprAs('a');
+  const threshold = kind === 'players' ? 30 : 45;
 
   // KPIs
   const kpi = (await query(`
@@ -1210,16 +1260,17 @@ async function loadExtraTable(R, opt) {
       AND (?3 = '' OR reviewer_name LIKE ?3 OR match_id LIKE ?3 OR code LIKE ?3)
   `, args)).rows[0] || {};
 
-  // Avg review time (rule-aware via same expr)
+  // Per-side/per-part avg + threshold split (above/below expected minutes)
   const avg = (await query(`
-    SELECT AVG(match_total) AS avg_actual FROM (
-      SELECT a.match_id, a.code, a.half, a.side,
-             SUM(${ruleActualExpr('a','dl')}) AS match_total
+    SELECT AVG(t) AS avg_actual,
+           SUM(CASE WHEN t > ${threshold} THEN 1 ELSE 0 END) AS above,
+           SUM(CASE WHEN t > 0 AND t <= ${threshold} THEN 1 ELSE 0 END) AS below,
+           SUM(CASE WHEN t = 0 THEN 1 ELSE 0 END) AS zero_time
+    FROM (
+      SELECT ${actualExpr} AS t
       FROM ${table} a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.code LIKE ?3)
-      GROUP BY a.match_id, a.code, a.half, a.side
     )
   `, args)).rows[0] || {};
 
@@ -1227,7 +1278,11 @@ async function loadExtraTable(R, opt) {
     { label: 'Assignments',      value: fmt(kpi.assignments),      sub: 'total rows' },
     { label: 'Distinct matches', value: fmt(kpi.distinct_matches), sub: 'unique games' },
     { label: 'Reviewers',        value: fmt(kpi.reviewers),        sub: 'active in range' },
-    { label: 'Avg review time',  value: avg.avg_actual != null ? fmt(avg.avg_actual) + ' min' : '—', sub: '' },
+    { label: 'Avg time / ' + (kind === 'players' ? 'side' : 'part'),
+      value: avg.avg_actual != null ? fmt(avg.avg_actual) + ' min' : '—',
+      sub: 'expected ≈ ' + threshold + ' min' },
+    { label: 'Above ' + threshold + ' min', value: fmt(avg.above || 0), sub: 'slower than expected' },
+    { label: 'Below ' + threshold + ' min', value: fmt(avg.below || 0), sub: 'faster than expected' },
   ];
   document.getElementById(opt.kpisId).innerHTML = cards.map(c => `
     <div class="kpi">
@@ -1237,45 +1292,46 @@ async function loadExtraTable(R, opt) {
     </div>
   `).join('');
 
-  // Reviewer breakdown — JOIN assignments for name/team enrichment
+  // Reviewer breakdown — per-side/per-part avg + threshold flags
   const revs = (await query(`
-    SELECT p.code AS code,
-           COALESCE(NULLIF(MAX(p.reviewer_name), ''),
-                    (SELECT reviewer_name FROM assignments WHERE code = p.code
-                       AND reviewer_name IS NOT NULL AND reviewer_name <> ''
-                       GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS reviewer_name,
-           (SELECT team FROM assignments WHERE code = p.code
+    SELECT a.code AS code,
+           (SELECT reviewer_name FROM assignments WHERE code = a.code
+              AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+              GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1) AS reviewer_name,
+           (SELECT team FROM assignments WHERE code = a.code
               AND team IS NOT NULL AND team <> ''
               GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team,
-           COUNT(*) AS matches_listed,
-           COUNT(DISTINCT p.match_id) AS distinct_matches,
-           (SELECT AVG(match_total) FROM (
-              SELECT a2.match_id, a2.code, a2.half, a2.side,
-                     SUM(${ruleActualExpr('a2','dl2')}) AS match_total
-              FROM ${table} a2
-              JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.code = a2.code
-              WHERE a2.code = p.code
-                AND a2.assignment_date BETWEEN ?1 AND ?2
-              GROUP BY a2.match_id, a2.code, a2.half, a2.side
-            )) AS avg_actual
-    FROM ${table} p
-    WHERE p.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.code LIKE ?3)
-    GROUP BY p.code
-    ORDER BY matches_listed DESC
+           COUNT(*) AS assignments,
+           AVG(${actualExpr}) AS avg_actual,
+           MIN(${actualExpr}) AS min_actual,
+           MAX(${actualExpr}) AS max_actual,
+           SUM(CASE WHEN ${actualExpr} > ${threshold} THEN 1 ELSE 0 END) AS above,
+           SUM(CASE WHEN ${actualExpr} > 0 AND ${actualExpr} <= ${threshold} THEN 1 ELSE 0 END) AS below
+    FROM ${table} a
+    WHERE a.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.code LIKE ?3)
+    GROUP BY a.code
+    ORDER BY assignments DESC
     LIMIT 500
   `, args)).rows;
   renderTable(opt.tblReviewer, [
-    { key:'code',             label:'Code' },
-    { key:'reviewer_name',    label:'Reviewer' },
-    { key:'team',             label:'Team' },
-    { key:'matches_listed',   label:'Assignments',      num:true },
-    { key:'distinct_matches', label:'Distinct matches', num:true },
-    { key:'avg_actual',       label:'Avg actual (min)', num:true },
+    { key:'code',           label:'Code' },
+    { key:'reviewer_name',  label:'Reviewer' },
+    { key:'team',           label:'Team' },
+    { key:'assignments',    label:'Assignments',    num:true },
+    { key:'avg_actual',     label:'Avg (min)',      num:true, raw:true, render: r => {
+      const v = round1(r.avg_actual || 0);
+      const cls = v > threshold ? 'style="color:var(--pos);font-weight:600"'
+                : (v > 0 ? 'style="color:var(--neg);font-weight:600"' : '');
+      return `<span ${cls}>${v}</span>`;
+    }},
+    { key:'min_actual',     label:'Min',            num:true },
+    { key:'max_actual',     label:'Max',            num:true },
+    { key:'above',          label:'> ' + threshold, num:true },
+    { key:'below',          label:'≤ ' + threshold, num:true },
   ], revs);
 
-  // Raw assignments list — LEFT JOIN assignments to fill name/team/match info.
-  // COALESCE(source, assignments) prefers whatever the source CSV provided.
+  // Raw assignments list — enriched via JOIN + per-side/per-part actual time
   const rows = (await query(`
     SELECT p.match_id, p.assignment_date,
            COALESCE(NULLIF(p.competition, ''), am.competition) AS competition,
@@ -1283,7 +1339,8 @@ async function loadExtraTable(R, opt) {
            COALESCE(NULLIF(p.away_team, ''),   am.away_team)   AS away_team,
            p.task, p.half, p.side, p.code,
            COALESCE(NULLIF(p.reviewer_name, ''), ac.reviewer_name) AS reviewer_name,
-           COALESCE(NULLIF(p.team, ''),          ac.team)          AS team
+           COALESCE(NULLIF(p.team, ''),          ac.team)          AS team,
+           ${actualExprAs('p')} AS actual_time
     FROM ${table} p
     LEFT JOIN (
       SELECT code,
@@ -1315,6 +1372,47 @@ async function loadExtraTable(R, opt) {
     { key:'competition',     label:'Competition' },
     { key:'home_team',       label:'Home' },
     { key:'away_team',       label:'Away' },
+    { key:'task',            label:'Task' },
+    { key:'half',            label:'Half' },
+    { key:'side',            label:'Side' },
+    { key:'code',            label:'Code' },
+    { key:'reviewer_name',   label:'Reviewer' },
+    { key:'team',            label:'Team' },
+    { key:'actual_time',     label:'Actual (min)', num:true, raw:true, render: r => {
+      const v = round1(r.actual_time || 0);
+      const cls = v > threshold ? 'style="color:var(--pos);font-weight:600"'
+                : (v > 0 ? 'style="color:var(--neg);font-weight:600"' : 'style="color:var(--text-dim)"');
+      return `<span ${cls}>${v}</span>`;
+    }},
+  ], rows);
+}
+
+// Players/BC "No Logs" view — rows in table with zero matching data_logs.
+async function loadExtraNoLogs(R, opt) {
+  const start = R.start, end = R.end;
+  const like  = STATE.q ? '%' + STATE.q + '%' : '';
+  const rows = (await query(`
+    SELECT p.match_id, p.assignment_date, p.task, p.half, p.side, p.code,
+           COALESCE(NULLIF(p.reviewer_name, ''),
+                    (SELECT reviewer_name FROM assignments WHERE code = p.code
+                       AND reviewer_name IS NOT NULL AND reviewer_name <> ''
+                       GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1)) AS reviewer_name,
+           (SELECT team FROM assignments WHERE code = p.code
+              AND team IS NOT NULL AND team <> ''
+              GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1) AS team
+    FROM ${opt.table} p
+    WHERE p.assignment_date BETWEEN ?1 AND ?2
+      AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
+      AND NOT EXISTS (
+        SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
+      )
+    ORDER BY p.assignment_date DESC, p.match_id DESC
+    LIMIT 2000
+  `, [start, end, like])).rows;
+  document.getElementById(opt.countId).textContent = rows.length + ' rows';
+  renderTable(opt.tblId, [
+    { key:'match_id',        label:'Match ID' },
+    { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'task',            label:'Task' },
     { key:'half',            label:'Half' },
     { key:'side',            label:'Side' },
@@ -1631,22 +1729,42 @@ function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g,
 // Normalize date-ish cell values to ISO yyyy-mm-dd (or yyyy-mm-ddTHH:MM:SS).
 // Handles: 'YYYY-MM-DD', 'M/D/YYYY', 'MM/DD/YYYY', with optional time.
 // Anything unrecognized → original string.
+// Force canonical form: 'YYYY-MM-DD' (date-only) or 'YYYY-MM-DDTHH:MM:SS'.
+// Accepts inputs like:
+//   2026-08-06T09:02:00, 2026-08-01 10:48, 2026-08-01,
+//   8/6/2026 9:02:00 AM, 8/6/2026 09:02, 8/6/2026
 function normalizeDate(v) {
   if (v == null) return '';
   const s = String(v).trim();
   if (!s) return '';
-  // Already ISO?
-  if (/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(s)) return s;
-  // M/D/YYYY [time...] — Sheets US default format
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(\s+.*)?$/);
+
+  // ISO-shape (with T or space separator, optional seconds)
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (m) {
-    const mm = m[1].padStart(2, '0');
-    const dd = m[2].padStart(2, '0');
-    const yyyy = m[3];
-    // Preserve optional time chunk if present
-    const rest = (m[4] || '').trim();
-    return rest ? `${yyyy}-${mm}-${dd} ${rest}` : `${yyyy}-${mm}-${dd}`;
+    const y  = m[1], mo = m[2], d = m[3];
+    if (!m[4]) return `${y}-${mo}-${d}`;
+    const h  = String(parseInt(m[4], 10)).padStart(2, '0');
+    const mi = m[5];
+    const se = m[6] || '00';
+    return `${y}-${mo}-${d}T${h}:${mi}:${se}`;
   }
+
+  // M/D/YYYY [H:MM[:SS] [AM/PM]] — US Sheets format
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i);
+  if (m) {
+    const yyyy = m[3];
+    const mo = m[1].padStart(2, '0');
+    const d  = m[2].padStart(2, '0');
+    if (!m[4]) return `${yyyy}-${mo}-${d}`;
+    let h = parseInt(m[4], 10);
+    const mi = m[5];
+    const se = m[6] || '00';
+    const ampm = (m[7] || '').toUpperCase();
+    if (ampm === 'PM' && h < 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+    return `${yyyy}-${mo}-${d}T${String(h).padStart(2, '0')}:${mi}:${se}`;
+  }
+
   return s;
 }
 
