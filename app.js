@@ -1362,6 +1362,11 @@ async function loadExtraTable(R, opt) {
     WHERE p.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3
            OR ac.reviewer_name LIKE ?3 OR am.competition LIKE ?3)
+      -- Only show assignments up to the latest logged work day
+      AND substr(p.assignment_date, 1, 10) <= COALESCE(
+        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+        '2999-12-31'
+      )
     ORDER BY p.assignment_date DESC, p.match_id DESC
     LIMIT 1000
   `, args)).rows;
@@ -1405,6 +1410,12 @@ async function loadExtraNoLogs(R, opt) {
       AND (?3 = '' OR p.reviewer_name LIKE ?3 OR p.match_id LIKE ?3 OR p.code LIKE ?3)
       -- Skip malformed rows w/ no reviewer code (they can't possibly log work)
       AND p.code IS NOT NULL AND p.code <> ''
+      -- Only flag as "No Logs" if assignment date is on or before the last logged day
+      -- (recent unlogged assignments hidden — work not expected yet)
+      AND substr(p.assignment_date, 1, 10) <= COALESCE(
+        (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
+        '2999-12-31'
+      )
       AND NOT EXISTS (
         SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
       )
