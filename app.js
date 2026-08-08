@@ -1804,6 +1804,15 @@ async function loadExtraTable(R, opt) {
           (SELECT substr(MAX(review_started), 1, 10) FROM data_logs),
           '2999-12-31'
         )
+        -- Exclude rows w/ no logs — those belong in No Logs view.
+        -- BC also enforces partid match (1st ↔ partid 1, 2nd ↔ partid 2).
+        AND EXISTS (
+          SELECT 1 FROM data_logs dl
+          WHERE dl.matchid = p.match_id AND dl.code = p.code
+            ${kind === 'bc'
+              ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
+              : ""}
+        )
     )
     ${outerWhere}
     ORDER BY assignment_date DESC, match_id DESC
