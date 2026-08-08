@@ -1557,22 +1557,37 @@ if (hoursSeg) hoursSeg.addEventListener('click', e => {
   if (STATE.view === 'hours') refresh();
 });
 
-// Actual Time filter (Assignments view)
-const atMode = document.getElementById('atMode');
-if (atMode) {
-  atMode.addEventListener('change', e => {
-    const v = e.target.value;
-    document.getElementById('atMax').style.display = (v === 'between') ? '' : 'none';
+// Actual Time filter — 3 identical control sets (Assignments / Players / BC).
+// All write into shared STATE.atMode, STATE.atMin, STATE.atMax.
+function wireActualTimeFilter(suffix, viewName) {
+  const mode = document.getElementById('atMode' + suffix);
+  if (!mode) return;
+  const min  = document.getElementById('atMin' + suffix);
+  const max  = document.getElementById('atMax' + suffix);
+  const btn  = document.getElementById('atApply' + suffix);
+  mode.addEventListener('change', e => {
+    max.style.display = (e.target.value === 'between') ? '' : 'none';
   });
-  document.getElementById('atApply').addEventListener('click', () => {
-    STATE.atMode = document.getElementById('atMode').value;
-    const min = document.getElementById('atMin').value;
-    const max = document.getElementById('atMax').value;
-    STATE.atMin = min === '' ? null : parseFloat(min);
-    STATE.atMax = max === '' ? null : parseFloat(max);
-    if (STATE.view === 'rows') refresh();
+  btn.addEventListener('click', () => {
+    STATE.atMode = mode.value;
+    STATE.atMin = min.value === '' ? null : parseFloat(min.value);
+    STATE.atMax = max.value === '' ? null : parseFloat(max.value);
+    // Sync all three DOM sets so state is consistent
+    ['','Players','Bc'].forEach(s => {
+      const m = document.getElementById('atMode' + s);
+      const mn = document.getElementById('atMin' + s);
+      const mx = document.getElementById('atMax' + s);
+      if (m)  m.value  = STATE.atMode;
+      if (mn) mn.value = STATE.atMin ?? '';
+      if (mx) mx.value = STATE.atMax ?? '';
+      if (mx) mx.style.display = STATE.atMode === 'between' ? '' : 'none';
+    });
+    if (STATE.view === viewName) refresh();
   });
 }
+wireActualTimeFilter('', 'rows');
+wireActualTimeFilter('Players', 'players');
+wireActualTimeFilter('Bc', 'bc');
 
 // CSV Export buttons — one delegated handler for every `data-export` attr
 document.body.addEventListener('click', e => {
@@ -1794,7 +1809,14 @@ async function loadExtraTable(R, opt) {
     ORDER BY assignment_date DESC, match_id DESC
     LIMIT 1000
   `, rowsArgs)).rows;
-  document.getElementById(opt.countId).textContent = rows.length + ' rows';
+  // Actual time filter (same as A-table)
+  let filteredRows = rows;
+  if (STATE.atMode === 'lt' && STATE.atMin != null) {
+    filteredRows = rows.filter(r => r.actual_time != null && r.actual_time < STATE.atMin);
+  } else if (STATE.atMode === 'between' && STATE.atMin != null && STATE.atMax != null) {
+    filteredRows = rows.filter(r => r.actual_time != null && r.actual_time >= STATE.atMin && r.actual_time <= STATE.atMax);
+  }
+  document.getElementById(opt.countId).textContent = filteredRows.length + ' rows';
   renderTable(opt.tblRows, [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
@@ -1813,7 +1835,7 @@ async function loadExtraTable(R, opt) {
                 : (v > 0 ? 'style="color:var(--neg);font-weight:600"' : 'style="color:var(--text-dim)"');
       return `<span ${cls}>${v}</span>`;
     }},
-  ], rows);
+  ], filteredRows);
 }
 
 // Players/BC "No Logs" view — rows in table with zero matching data_logs.
@@ -1859,7 +1881,12 @@ async function loadExtraNoLogs(R, opt) {
           '2999-12-31'
         )
         AND NOT EXISTS (
-          SELECT 1 FROM data_logs dl WHERE dl.matchid = p.match_id AND dl.code = p.code
+          SELECT 1 FROM data_logs dl
+          WHERE dl.matchid = p.match_id AND dl.code = p.code
+            -- BC rows are half-specific → require partid match. Players ignore half.
+            ${opt.table === 'bc_review'
+              ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
+              : ""}
         )
     )
     ${havingClause}

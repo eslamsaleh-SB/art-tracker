@@ -399,7 +399,16 @@
     <div class="panel">
       <div class="panel-header">
         <h3 class="panel-title">Assignments</h3>
-        <div class="panel-actions">
+        <div class="panel-actions" style="gap:10px;">
+          <span class="panel-sub">Actual (min):</span>
+          <select id="atModePlayers" class="select" style="padding:6px 8px;">
+            <option value="">any</option>
+            <option value="lt">less than</option>
+            <option value="between">between</option>
+          </select>
+          <input id="atMinPlayers" class="input" type="number" placeholder="min" style="width:80px;padding:6px 8px;">
+          <input id="atMaxPlayers" class="input" type="number" placeholder="max" style="width:80px;padding:6px 8px;display:none;">
+          <button class="btn-icon" id="atApplyPlayers">Apply</button>
           <span class="chip" id="playersRowsCount">0</span>
           <button class="btn-icon" data-export="tblPlayersRows">Export CSV</button>
         </div>
@@ -421,7 +430,16 @@
     <div class="panel">
       <div class="panel-header">
         <h3 class="panel-title">Assignments</h3>
-        <div class="panel-actions">
+        <div class="panel-actions" style="gap:10px;">
+          <span class="panel-sub">Actual (min):</span>
+          <select id="atModeBc" class="select" style="padding:6px 8px;">
+            <option value="">any</option>
+            <option value="lt">less than</option>
+            <option value="between">between</option>
+          </select>
+          <input id="atMinBc" class="input" type="number" placeholder="min" style="width:80px;padding:6px 8px;">
+          <input id="atMaxBc" class="input" type="number" placeholder="max" style="width:80px;padding:6px 8px;display:none;">
+          <button class="btn-icon" id="atApplyBc">Apply</button>
           <span class="chip" id="bcRowsCount">0</span>
           <button class="btn-icon" data-export="tblBcRows">Export CSV</button>
         </div>
