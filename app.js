@@ -817,44 +817,43 @@ async function loadTasks(R) {
         AND b2.assignment_date BETWEEN ?1 AND ?2
     )` : '';
 
-  // Per-unit actual times — one row per unit for stats (avg/median/min)
+  // Per-match totals — one row per (task, match, reviewer). Actual = SUM of
+  // ALL data_logs sessions for that reviewer × match, regardless of half/side/partid.
+  // Compared against full-match expected minutes from productivity_config.
   const mainUnits = (await query(`
-    SELECT a.task AS task,
-           SUM(${ruleActualExpr('a','dl')}) AS actual
-    FROM assignments a
-    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-      AND a.task IS NOT NULL AND a.task <> ''
-      ${efA.sql}
-      ${exclMain}
-    GROUP BY a.task, a.match_id, a.code, a.half, a.side
+    SELECT task, match_id, code,
+           COALESCE(SUM(actual_time_taken), 0) AS actual
+    FROM (
+      SELECT DISTINCT a.task AS task, a.match_id AS match_id, a.code AS code
+      FROM assignments a
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+        AND a.task IS NOT NULL AND a.task <> ''
+        ${efA.sql}
+        ${exclMain}
+    ) tc
+    JOIN data_logs dl ON dl.matchid = tc.match_id AND dl.code = tc.code
+    GROUP BY task, match_id, code
   `, [start, end, like, ...efA.args])).rows;
 
-  // Players — unit = (match_id, code, side). Actual per side.
+  // Players — per-match total.
   const playersUnits = (await query(`
     SELECT p.task AS task,
-      CASE
-        WHEN (SELECT COUNT(*) FROM players pp
-              WHERE pp.match_id = p.match_id AND pp.code = p.code) >= 2
-        THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) / 2.0
-        ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0)
-      END AS actual
-    FROM players p
-    WHERE p.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclPlayers}
+      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) AS actual
+    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM players
+          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) p
+    WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
   `, [start, end, ...ef.args])).rows;
 
-  // BC — unit = (match_id, code, half=partid). Actual per partid.
+  // BC — per-match total.
   const bcUnits = (await query(`
     SELECT b.task AS task,
       COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                WHERE dl.matchid = b.match_id AND dl.code = b.code
-                  AND dl.partid = CASE WHEN b.half = '1st' THEN '1'
-                                       WHEN b.half = '2nd' THEN '2' ELSE '0' END), 0) AS actual
-    FROM bc_review b
-    WHERE b.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclBc}
+                WHERE dl.matchid = b.match_id AND dl.code = b.code), 0) AS actual
+    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM bc_review
+          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) b
+    WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
   `, [start, end, ...ef.args])).rows;
 
   // Group by task → array of actuals for stat computation
@@ -953,8 +952,8 @@ async function loadTasks(R) {
           <div class="task-card-stat-value">${t.expected != null ? fmt(t.expected) : '—'}</div>
         </div>
         <div class="task-card-stat">
-          <div class="task-card-stat-label">Min actual</div>
-          <div class="task-card-stat-value">${t.min_actual != null ? fmt(t.min_actual) : '—'}</div>
+          <div class="task-card-stat-label">Sample size</div>
+          <div class="task-card-stat-value">${fmt(t.n || 0)}</div>
         </div>
       </div>
       <table style="width:100%;margin-top:8px;font-size:12px;border-collapse:collapse;">
@@ -992,40 +991,37 @@ async function loadTasks(R) {
   const gexprB = granExpr('b.assignment_date', STATE.taskGran);
 
   const trendMain = (await query(`
-    SELECT a.task AS task, ${gexprA} AS bucket,
-           SUM(${ruleActualExpr('a','dl')}) AS actual
-    FROM assignments a
-    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
-      AND a.task IS NOT NULL AND a.task <> ''
-      ${efA.sql}
-      ${exclMain}
-    GROUP BY a.task, bucket, a.match_id, a.code, a.half, a.side
+    SELECT task, bucket, SUM(actual_time_taken) AS actual
+    FROM (
+      SELECT DISTINCT a.task AS task, ${gexprA} AS bucket,
+             a.match_id AS match_id, a.code AS code
+      FROM assignments a
+      WHERE a.assignment_date BETWEEN ?1 AND ?2
+        AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+        AND a.task IS NOT NULL AND a.task <> ''
+        ${efA.sql}
+        ${exclMain}
+    ) tc
+    JOIN data_logs dl ON dl.matchid = tc.match_id AND dl.code = tc.code
+    GROUP BY task, bucket, match_id, code
   `, [start, end, like, ...efA.args])).rows;
 
   const trendPlayers = (await query(`
     SELECT p.task AS task, ${gexprP} AS bucket,
-      CASE
-        WHEN (SELECT COUNT(*) FROM players pp
-              WHERE pp.match_id = p.match_id AND pp.code = p.code) >= 2
-        THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) / 2.0
-        ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0)
-      END AS actual
-    FROM players p
-    WHERE p.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclPlayers}
+      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+                WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) AS actual
+    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM players
+          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) p
+    WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
   `, [start, end, ...ef.args])).rows;
 
   const trendBc = (await query(`
     SELECT b.task AS task, ${gexprB} AS bucket,
       COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                WHERE dl.matchid = b.match_id AND dl.code = b.code
-                  AND dl.partid = CASE WHEN b.half = '1st' THEN '1'
-                                       WHEN b.half = '2nd' THEN '2' ELSE '0' END), 0) AS actual
-    FROM bc_review b
-    WHERE b.assignment_date BETWEEN ?1 AND ?2 ${ef.sql} ${exclBc}
+                WHERE dl.matchid = b.match_id AND dl.code = b.code), 0) AS actual
+    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM bc_review
+          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) b
+    WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
   `, [start, end, ...ef.args])).rows;
 
   // Group per (task, bucket) → array of actuals
