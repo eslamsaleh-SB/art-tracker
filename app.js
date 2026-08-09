@@ -45,6 +45,9 @@ const VIEW_TO_COMMENT_TABLE = {
   players_nologs: 'comments_players_nologs',
   bc_nologs: 'comments_bc_nologs',
   players_partial: 'comments_players_partial',
+  rows: 'comments_assignments',
+  players: 'comments_players_assignments',
+  bc: 'comments_bc_assignments',
 };
 const COMMENTS = { byTable: {}, filter: { hasComment: 'all', author: '', status: '' } };
 
@@ -1384,9 +1387,10 @@ async function loadRows(R) {
       r.actual != null && r.actual >= STATE.atMin && r.actual <= STATE.atMax);
   }
 
-  document.getElementById('rowsCount').textContent =
-    filtered.length + ' rows' + (filtered.length !== enriched.length ? ' (of ' + enriched.length + ')' : '');
-  renderTable('tblRows', [
+  const TBL = 'comments_assignments';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar('cmFilter_assignments', () => loadRows(R));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned' },
     { key:'competition',     label:'Competition' },
@@ -1411,7 +1415,12 @@ async function loadRows(R) {
       },
     },
     { key:'notes', label:'Notes' },
-  ], filtered);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, filtered,
+    ['match_id','code','task','half','side'], () => loadRows(R));
+  document.getElementById('rowsCount').textContent =
+    fr.length + ' rows' + (fr.length !== enriched.length ? ' (of ' + enriched.length + ')' : '');
+  renderTable('tblRows', cols, fr);
 
   renderPager(totalPages);
 }
@@ -1825,8 +1834,11 @@ async function loadExtraTable(R, opt) {
   } else if (STATE.atMode === 'between' && STATE.atMin != null && STATE.atMax != null) {
     filteredRows = rows.filter(r => r.actual_time != null && r.actual_time >= STATE.atMin && r.actual_time <= STATE.atMax);
   }
-  document.getElementById(opt.countId).textContent = filteredRows.length + ' rows';
-  renderTable(opt.tblRows, [
+  const TBL = kind === 'players' ? 'comments_players_assignments' : 'comments_bc_assignments';
+  const FID = kind === 'players' ? 'cmFilter_players_assignments' : 'cmFilter_bc_assignments';
+  await loadCommentsFor(TBL);
+  renderCommentFilterBar(FID, () => loadExtraTable(R, opt));
+  const baseCols = [
     { key:'match_id',        label:'Match ID' },
     { key:'assignment_date', label:'Assigned', render: r => (r.assignment_date || '').slice(0,10) },
     { key:'competition',     label:'Competition' },
@@ -1844,7 +1856,11 @@ async function loadExtraTable(R, opt) {
                 : (v > 0 ? 'style="color:var(--neg);font-weight:600"' : 'style="color:var(--text-dim)"');
       return `<span ${cls}>${v}</span>`;
     }},
-  ], filteredRows);
+  ];
+  const { cols, rows: fr } = withComments(TBL, baseCols, filteredRows,
+    ['match_id','code','task','half','side'], () => loadExtraTable(R, opt));
+  document.getElementById(opt.countId).textContent = fr.length + ' rows';
+  renderTable(opt.tblRows, cols, fr);
 }
 
 // Players/BC "No Logs" view — rows in table with zero matching data_logs.

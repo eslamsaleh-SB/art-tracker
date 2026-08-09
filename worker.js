@@ -49,6 +49,7 @@ export default {
       const ALLOWED = new Set([
         'comments_nologs','comments_partial',
         'comments_players_nologs','comments_bc_nologs','comments_players_partial',
+        'comments_assignments','comments_players_assignments','comments_bc_assignments',
       ]);
       if (!ALLOWED.has(table)) return Response.json({ error: 'bad table' }, { status: 400 });
       if (!row_key) return Response.json({ error: 'row_key required' }, { status: 400 });
@@ -83,6 +84,7 @@ export default {
       const ALLOWED = new Set([
         'comments_nologs','comments_partial',
         'comments_players_nologs','comments_bc_nologs','comments_players_partial',
+        'comments_assignments','comments_players_assignments','comments_bc_assignments',
       ]);
       if (!ALLOWED.has(table)) return Response.json({ error: 'bad table' }, { status: 400 });
       if (!row_key) return Response.json({ error: 'row_key required' }, { status: 400 });
@@ -116,6 +118,7 @@ export default {
       const ALLOWED = new Set([
         'comments_nologs','comments_partial',
         'comments_players_nologs','comments_bc_nologs','comments_players_partial',
+        'comments_assignments','comments_players_assignments','comments_bc_assignments',
       ]);
       if (!ALLOWED.has(table) || !row_key) return Response.json({ error: 'bad request' }, { status: 400 });
       const sql = `DELETE FROM ${table} WHERE row_key = ?`;
