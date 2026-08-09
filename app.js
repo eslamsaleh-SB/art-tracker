@@ -334,6 +334,7 @@ const STATE = {
   gran: 'month',
   taskGran: 'month',
   taskExcludeSameDay: false,   // exclude same-reviewer, same-day multi-match units from stats
+  excludeMultiTask: false,     // global — skip (reviewer, day) tuples where reviewer worked ≥2 distinct tasks
   q: '',
   teams: [],           // multi-select include (empty = all)
   teamsExclude: [],    // deprecated — kept for backward compat, always empty now
@@ -597,6 +598,24 @@ function minToHM(min) {
 
 // Build the shared WHERE clause + args starting at position 4
 // (positions 1-3 already used: start, end, q-like)
+// If STATE.excludeMultiTask, skip units where the reviewer had ≥1 OTHER task
+// on the same day (in assignments/players/bc_review). Return NOT-EXISTS clause
+// or '' when the toggle is off.
+function overlapClause(alias) {
+  if (!STATE.excludeMultiTask) return '';
+  const day  = `substr(${alias}.assignment_date, 1, 10)`;
+  const code = `${alias}.code`;
+  const task = `${alias}.task`;
+  return `
+    AND NOT EXISTS (SELECT 1 FROM assignments oa
+      WHERE oa.code = ${code} AND substr(oa.assignment_date,1,10) = ${day} AND oa.task <> ${task})
+    AND NOT EXISTS (SELECT 1 FROM players op
+      WHERE op.code = ${code} AND substr(op.assignment_date,1,10) = ${day} AND op.task <> ${task})
+    AND NOT EXISTS (SELECT 1 FROM bc_review ob
+      WHERE ob.code = ${code} AND substr(ob.assignment_date,1,10) = ${day} AND ob.task <> ${task})
+  `;
+}
+
 function extraFilterSQL(prefix) {
   const parts = [];
   const args  = [];
@@ -844,6 +863,7 @@ async function loadTasks(R) {
         AND a.task IS NOT NULL AND a.task <> ''
         ${efA.sql}
         ${exclMain}
+        ${overlapClause('a')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, match_id, code, half, side) AS anchor
@@ -870,7 +890,7 @@ async function loadTasks(R) {
              dl.review_started, dl.actual_time_taken
       FROM players_scope p
       JOIN data_logs dl ON dl.matchid = p.match_id AND dl.code = p.code
-      WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
+      WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')} ${overlapClause('p')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, match_id, code) AS anchor
@@ -893,7 +913,7 @@ async function loadTasks(R) {
       FROM bc_scope b
       JOIN data_logs dl ON dl.matchid = b.match_id AND dl.code = b.code
         AND dl.partid = CASE WHEN b.half = '1st' THEN '1' WHEN b.half = '2nd' THEN '2' ELSE '0' END
-      WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
+      WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')} ${overlapClause('b')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, match_id, code, half) AS anchor
@@ -1062,6 +1082,7 @@ async function loadTasks(R) {
         AND a.task IS NOT NULL AND a.task <> ''
         ${efA.sql}
         ${exclMain}
+        ${overlapClause('a')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code, half, side) AS anchor
@@ -1088,7 +1109,7 @@ async function loadTasks(R) {
              dl.review_started, dl.actual_time_taken
       FROM players_scope p
       JOIN data_logs dl ON dl.matchid = p.match_id AND dl.code = p.code
-      WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
+      WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')} ${overlapClause('p')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code) AS anchor
@@ -1111,7 +1132,7 @@ async function loadTasks(R) {
       FROM bc_scope b
       JOIN data_logs dl ON dl.matchid = b.match_id AND dl.code = b.code
         AND dl.partid = CASE WHEN b.half = '1st' THEN '1' WHEN b.half = '2nd' THEN '2' ELSE '0' END
-      WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
+      WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')} ${overlapClause('b')}
     ),
     anchored AS (
       SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code, half) AS anchor
@@ -1333,6 +1354,7 @@ async function loadRows(R) {
         WHERE dl.matchid = assignments.match_id AND dl.code = assignments.code
       )
       ${ef.sql}
+      ${overlapClause('assignments')}
   `;
   const totalRow = (await query(
     `SELECT COUNT(*) AS c FROM assignments ${commonWhere}`,
@@ -1629,6 +1651,10 @@ document.getElementById('taskGranSeg').addEventListener('click', e => {
 document.getElementById('taskExcludeSameDay').addEventListener('change', e => {
   STATE.taskExcludeSameDay = e.target.checked;
   if (STATE.view === 'tasks') refresh();
+});
+document.getElementById('excludeMultiTask').addEventListener('change', e => {
+  STATE.excludeMultiTask = e.target.checked;
+  refresh();  // global — affects all views with actual-time calculations
 });
 
 // Search input removed in favor of dropdown filters — guard in case it's absent.
@@ -1997,6 +2023,7 @@ async function loadExtraTable(R, opt) {
               ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
               : ""}
         )
+        ${overlapClause('p')}
     )
     ${outerWhere}
     ORDER BY assignment_date DESC, match_id DESC
