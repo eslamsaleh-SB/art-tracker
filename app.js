@@ -1043,38 +1043,88 @@ async function loadTasks(R) {
   const gexprP = granExpr('p.assignment_date', STATE.taskGran);
   const gexprB = granExpr('b.assignment_date', STATE.taskGran);
 
+  // Trend queries — 24h anchor rule applied per unit inside each bucket.
   const trendMain = (await query(`
-    SELECT task, bucket, SUM(actual_time_taken) AS actual
-    FROM (
-      SELECT DISTINCT a.task AS task, ${gexprA} AS bucket,
-             a.match_id AS match_id, a.code AS code
+    WITH unit_logs AS (
+      SELECT a.task AS task, ${gexprA} AS bucket,
+             a.match_id AS match_id, a.code AS code, a.half, a.side,
+             dl.review_started, dl.actual_time_taken
       FROM assignments a
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+        AND (
+          (lower(a.half) = '1st' AND dl.partid = '1') OR
+          (lower(a.half) = '2nd' AND dl.partid = '2') OR
+          (lower(a.half) NOT IN ('1st','2nd'))
+        )
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
         AND a.task IS NOT NULL AND a.task <> ''
         ${efA.sql}
         ${exclMain}
-    ) tc
-    JOIN data_logs dl ON dl.matchid = tc.match_id AND dl.code = tc.code
+    ),
+    anchored AS (
+      SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code, half, side) AS anchor
+      FROM unit_logs
+    ),
+    unit_actual AS (
+      SELECT task, bucket, match_id, code, half, side, SUM(actual_time_taken) AS unit_total
+      FROM anchored
+      WHERE julianday(review_started) - julianday(anchor) <= 1.0
+      GROUP BY task, bucket, match_id, code, half, side
+    )
+    SELECT task, bucket, match_id, code, SUM(unit_total) AS actual
+    FROM unit_actual
     GROUP BY task, bucket, match_id, code
   `, [start, end, like, ...efA.args])).rows;
 
   const trendPlayers = (await query(`
-    SELECT p.task AS task, ${gexprP} AS bucket,
-      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) AS actual
-    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM players
-          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) p
-    WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
+    WITH players_scope AS (
+      SELECT DISTINCT match_id, code, task, assignment_date FROM players
+      WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}
+    ),
+    unit_logs AS (
+      SELECT p.task, ${gexprP} AS bucket, p.match_id, p.code,
+             dl.review_started, dl.actual_time_taken
+      FROM players_scope p
+      JOIN data_logs dl ON dl.matchid = p.match_id AND dl.code = p.code
+      WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')}
+    ),
+    anchored AS (
+      SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code) AS anchor
+      FROM unit_logs
+    )
+    SELECT task, bucket, match_id, code, SUM(actual_time_taken) AS actual
+    FROM anchored
+    WHERE julianday(review_started) - julianday(anchor) <= 1.0
+    GROUP BY task, bucket, match_id, code
   `, [start, end, ...ef.args])).rows;
 
   const trendBc = (await query(`
-    SELECT b.task AS task, ${gexprB} AS bucket,
-      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                WHERE dl.matchid = b.match_id AND dl.code = b.code), 0) AS actual
-    FROM (SELECT DISTINCT match_id, code, task, assignment_date FROM bc_review
-          WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}) b
-    WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
+    WITH bc_scope AS (
+      SELECT DISTINCT match_id, code, task, half, assignment_date FROM bc_review
+      WHERE assignment_date BETWEEN ?1 AND ?2 ${ef.sql}
+    ),
+    unit_logs AS (
+      SELECT b.task, ${gexprB} AS bucket, b.match_id, b.code, b.half,
+             dl.review_started, dl.actual_time_taken
+      FROM bc_scope b
+      JOIN data_logs dl ON dl.matchid = b.match_id AND dl.code = b.code
+        AND dl.partid = CASE WHEN b.half = '1st' THEN '1' WHEN b.half = '2nd' THEN '2' ELSE '0' END
+      WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')}
+    ),
+    anchored AS (
+      SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code, half) AS anchor
+      FROM unit_logs
+    ),
+    unit_actual AS (
+      SELECT task, bucket, match_id, code, half, SUM(actual_time_taken) AS unit_total
+      FROM anchored
+      WHERE julianday(review_started) - julianday(anchor) <= 1.0
+      GROUP BY task, bucket, match_id, code, half
+    )
+    SELECT task, bucket, match_id, code, SUM(unit_total) AS actual
+    FROM unit_actual
+    GROUP BY task, bucket, match_id, code
   `, [start, end, ...ef.args])).rows;
 
   // Group per (task, bucket) → array of actuals
@@ -1701,26 +1751,53 @@ async function loadExtraTable(R, opt) {
   const args  = [start, end, like];
 
   // SQL fragment for actual time — parameterized by outer alias
+  // 24h-anchored actual time — matches Assignments view logic.
+  // Anchor = MIN(review_started) per unit; sessions beyond 24h dropped.
   function actualExprAs(a) {
     if (kind === 'players') {
+      // Unit = (match, code). All partids anchor together (whole match).
+      // If 2 sides assigned to this reviewer → per-side actual = total/2.
       return `(
         CASE
           WHEN (SELECT COUNT(*) FROM ${table} pp
                 WHERE pp.match_id = ${a}.match_id AND pp.code = ${a}.code) >= 2
-          THEN COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code), 0) / 2.0
-          ELSE COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code), 0)
+          THEN COALESCE((
+            SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+            WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+              AND julianday(dl.review_started) - julianday((
+                SELECT MIN(dl2.review_started) FROM data_logs dl2
+                WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+              )) <= 1.0
+          ), 0) / 2.0
+          ELSE COALESCE((
+            SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+            WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+              AND julianday(dl.review_started) - julianday((
+                SELECT MIN(dl2.review_started) FROM data_logs dl2
+                WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+              )) <= 1.0
+          ), 0)
         END
       )`;
     }
+    // BC: unit = (match, code, half). Partid filtered by half. Anchor per half.
     return `(
-      COALESCE((SELECT SUM(dl.actual_time_taken) FROM data_logs dl
-                WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
-                  AND dl.partid = CASE
+      COALESCE((
+        SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+          AND dl.partid = CASE
+                WHEN lower(${a}.half) = '1st' THEN '1'
+                WHEN lower(${a}.half) = '2nd' THEN '2'
+                ELSE '0' END
+          AND julianday(dl.review_started) - julianday((
+            SELECT MIN(dl2.review_started) FROM data_logs dl2
+            WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+              AND dl2.partid = CASE
                     WHEN lower(${a}.half) = '1st' THEN '1'
                     WHEN lower(${a}.half) = '2nd' THEN '2'
-                    ELSE '0' END), 0)
+                    ELSE '0' END
+          )) <= 1.0
+      ), 0)
     )`;
   }
   const actualExpr = actualExprAs('a');
@@ -1837,7 +1914,17 @@ async function loadExtraTable(R, opt) {
              p.task, p.half, p.side, p.code,
              COALESCE(NULLIF(p.reviewer_name, ''), ac.reviewer_name) AS reviewer_name,
              COALESCE(NULLIF(p.team, ''),          ac.team)          AS team,
-             ${actualExprAs('p')} AS actual_time
+             ${actualExprAs('p')} AS actual_time,
+             -- Hours between assignment_date and FIRST review_started for this unit.
+             -- Players: any partid. BC: partid must match half.
+             (
+               SELECT (julianday(MIN(dl.review_started)) - julianday(p.assignment_date)) * 24.0
+               FROM data_logs dl
+               WHERE dl.matchid = p.match_id AND dl.code = p.code
+                 ${kind === 'bc'
+                   ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
+                   : ""}
+             ) AS hours_since_assigned
       FROM ${table} p
       LEFT JOIN (
         SELECT code,
@@ -1900,6 +1987,16 @@ async function loadExtraTable(R, opt) {
     { key:'code',            label:'Code' },
     { key:'reviewer_name',   label:'Reviewer' },
     { key:'team',            label:'Team' },
+    { key:'notes', label:'Notes', raw:true, render: r => {
+      const h = parseFloat(r.hours_since_assigned);
+      if (!isFinite(h)) return '';
+      if (h > 24) {
+        const days = Math.floor(h / 24);
+        const hrs  = Math.round(h - days * 24);
+        return `<span style="color:var(--neg,#f66);font-weight:600" title="First log ${round1(h)}h after assignment">⚠ Reviewed ${days}d ${hrs}h after assignment</span>`;
+      }
+      return `<span style="color:var(--text-dim)">on time</span>`;
+    }},
     { key:'actual_time',     label:'Actual (min)', num:true, raw:true, render: r => {
       const v = round1(r.actual_time || 0);
       const cls = v > threshold ? 'style="color:var(--pos);font-weight:600"'
