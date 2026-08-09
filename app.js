@@ -2626,7 +2626,7 @@ function stackedBar(canvasId, labels, datasets) {
 // Matches — core data loader (fetches + filters JS-side)
 // ============================================================
 async function loadMatchesData() {
-  const { rows } = await query(`SELECT * FROM matches ORDER BY first_collection_complete DESC`);
+  const { rows } = await query(`SELECT * FROM quality_delivery_time ORDER BY first_collection_complete DESC`);
   rows.forEach(r => { r.priority = computePriority(r); });
 
   let filtered = rows;
@@ -2686,10 +2686,10 @@ async function loadMatchesPage() {
 
   // Fetch distinct home/away values for the filter dropdowns
   const [homeRes, awayRes] = await Promise.all([
-    query(`SELECT DISTINCT priority_sb_home AS v FROM matches
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time
            WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> ''
            ORDER BY priority_sb_home`),
-    query(`SELECT DISTINCT priority_sb_away AS v FROM matches
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time
            WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> ''
            ORDER BY priority_sb_away`),
   ]);
@@ -3000,7 +3000,7 @@ const IMPORT_CONFIG = {
     },
     requiredCols: ['match_id', 'code'],
   },
-  matches: {
+  quality_delivery_time: {
     // Columns A-S map positionally; also matches by header name
     dbCols: [
       'matchid','match_name','match_kick_off','game_sla',
