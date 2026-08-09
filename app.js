@@ -251,6 +251,65 @@ function fmt(n) {
   return round1(n);
 }
 
+// ============================================================
+// Matches — priority + date helpers
+// ============================================================
+const PRIORITY_ORDER = ['Customer', 'Academic', 'Opponent', 'Trial'];
+const MATCHES_PRIORITY_COLORS = {
+  Customer: '#3b82f6', Academic: '#22c55e', Opponent: '#f97316',
+  Trial: '#94a3b8', Other: '#e2e8f0',
+};
+
+function computePriority(row) {
+  const vals = [row.priority_sb_home, row.priority_sb_away]
+    .map(v => (v || '').trim().toLowerCase());
+  for (const p of PRIORITY_ORDER) {
+    if (vals.some(v => v.includes(p.toLowerCase()))) return p;
+  }
+  return 'Other';
+}
+
+function getWeekStart(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  const day = d.getDay();
+  const sun = new Date(d);
+  sun.setDate(d.getDate() - day);
+  return sun.toISOString().slice(0, 10);
+}
+function getWeekLabel(dateStr) {
+  const s = getWeekStart(dateStr);
+  if (!s) return 'Unknown';
+  const e = new Date(s); e.setDate(e.getDate() + 6);
+  return `${s} – ${e.toISOString().slice(0, 10)}`;
+}
+function getMonthLabel(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d)) return 'Unknown';
+  return d.toISOString().slice(0, 7);
+}
+
+const MATCHES_DISPLAY_COLS = [
+  { key: 'matchid',                   label: 'Match ID' },
+  { key: 'match_name',                label: 'Match Name' },
+  { key: 'game_sla',                  label: 'SLA' },
+  { key: 'priority_sb_competition',   label: 'Competition Priority' },
+  { key: 'game_due_date',             label: 'Due Date' },
+  { key: 'first_collection_complete', label: 'Collection Complete' },
+  { key: 'a_review_date',             label: 'Review Date' },
+  { key: 'match_review_started',      label: 'Review Started' },
+  { key: 'match_review_ended',        label: 'Review Ended' },
+  { key: 'delivery_time',             label: 'Delivery Time (h)', num: true },
+  {
+    key: 'priority', label: 'Priority', raw: true,
+    render: r => {
+      const c = MATCHES_PRIORITY_COLORS[r.priority] || '#e2e8f0';
+      const tc = r.priority === 'Other' ? '#475569' : '#fff';
+      return '<span class="chip" style="background:' + c + ';color:' + tc + ';">' + esc(r.priority) + '</span>';
+    },
+  },
+];
+
 // Compute {start, end} YYYY-MM-DD from a preset. Trailing-window presets
 // (last 30d, 3m, 6m, 12m) show trend leading up to today — MoM/QoQ view.
 function presetRange(preset) {
@@ -356,6 +415,14 @@ const STATE = {
   filtersLoaded: false,
   sortState: {},       // { tblId: { key, dir } }
   lastRows: {},        // { tblId: [rows] } — for CSV export
+  // Matches filters — shared across all 4 matches views
+  matchesExcludeIds: '',
+  matchesOutlierOp: '',
+  matchesOutlierVal: '',
+  matchesPriorityFilter: '',
+  matchesPriorityExclude: false,
+  matchesHomeFilter: '',
+  matchesAwayFilter: '',
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -534,6 +601,8 @@ function setView(name) {
     players_partial: 'Players — Partial Coverage',
     nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
+    matches: 'Matches', matches_daily: 'Matches — Daily Performance',
+    matches_weekly: 'Matches — Weekly Performance', matches_monthly: 'Matches — Monthly Performance',
   }[name] || name;
   refresh();
 }
@@ -671,6 +740,10 @@ async function refresh(opts) {
     if (STATE.view === 'partial')          await loadPartial(R);
     if (STATE.view === 'players_partial')  await loadPlayersPartial(R);
     if (STATE.view === 'hours')     await loadHours(R);
+    if (STATE.view === 'matches')         await loadMatchesPage();
+    if (STATE.view === 'matches_daily')   await loadMatchesDaily();
+    if (STATE.view === 'matches_weekly')  await loadMatchesWeekly();
+    if (STATE.view === 'matches_monthly') await loadMatchesMonthly();
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {
@@ -2526,6 +2599,357 @@ async function loadHours(R) {
 }
 
 // ============================================================
+// Matches — stacked bar chart helper
+// ============================================================
+function stackedBar(canvasId, labels, datasets) {
+  destroyChart(canvasId);
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return;
+  CHARTS[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, position: 'top', labels: { boxWidth: 10 } },
+        tooltip: { intersect: false, mode: 'index' },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { autoSkip: true, maxRotation: 45 } },
+        y: { stacked: true, grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+      },
+    },
+  });
+}
+
+// ============================================================
+// Matches — core data loader (fetches + filters JS-side)
+// ============================================================
+async function loadMatchesData() {
+  const { rows } = await query(`SELECT * FROM matches ORDER BY first_collection_complete DESC`);
+  rows.forEach(r => { r.priority = computePriority(r); });
+
+  let filtered = rows;
+
+  // Exclude specific match IDs
+  if (STATE.matchesExcludeIds) {
+    const excl = new Set(
+      STATE.matchesExcludeIds.split(',').map(s => s.trim()).filter(Boolean)
+    );
+    filtered = filtered.filter(r => !excl.has(r.matchid));
+  }
+
+  // Outlier filter on delivery_time
+  if (STATE.matchesOutlierOp && STATE.matchesOutlierVal !== '') {
+    const threshold = parseFloat(STATE.matchesOutlierVal);
+    if (!isNaN(threshold)) {
+      if (STATE.matchesOutlierOp === 'above') {
+        filtered = filtered.filter(r => {
+          const v = parseFloat(r.delivery_time);
+          return isNaN(v) || v <= threshold;
+        });
+      } else if (STATE.matchesOutlierOp === 'below') {
+        filtered = filtered.filter(r => {
+          const v = parseFloat(r.delivery_time);
+          return isNaN(v) || v >= threshold;
+        });
+      }
+    }
+  }
+
+  // Priority filter
+  if (STATE.matchesPriorityFilter) {
+    if (STATE.matchesPriorityExclude) {
+      filtered = filtered.filter(r => r.priority !== STATE.matchesPriorityFilter);
+    } else {
+      filtered = filtered.filter(r => r.priority === STATE.matchesPriorityFilter);
+    }
+  }
+
+  // Home / away priority column filters
+  if (STATE.matchesHomeFilter) {
+    filtered = filtered.filter(r => (r.priority_sb_home || '') === STATE.matchesHomeFilter);
+  }
+  if (STATE.matchesAwayFilter) {
+    filtered = filtered.filter(r => (r.priority_sb_away || '') === STATE.matchesAwayFilter);
+  }
+
+  return filtered;
+}
+
+// ============================================================
+// Matches — main panel (filter bar + table + priority chart)
+// ============================================================
+async function loadMatchesPage() {
+  const panel = document.getElementById('panel-matches');
+  if (!panel) return;
+
+  // Fetch distinct home/away values for the filter dropdowns
+  const [homeRes, awayRes] = await Promise.all([
+    query(`SELECT DISTINCT priority_sb_home AS v FROM matches
+           WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> ''
+           ORDER BY priority_sb_home`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM matches
+           WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> ''
+           ORDER BY priority_sb_away`),
+  ]);
+  const homeOpts = homeRes.rows.map(r => r.v);
+  const awayOpts = awayRes.rows.map(r => r.v);
+
+  const rows = await loadMatchesData();
+
+  // Priority counts for the chart
+  const priorityLabels = [...PRIORITY_ORDER, 'Other'];
+  const priorityCounts = {};
+  priorityLabels.forEach(p => { priorityCounts[p] = 0; });
+  rows.forEach(r => { priorityCounts[r.priority] = (priorityCounts[r.priority] || 0) + 1; });
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Matches filters</h3>
+        <div class="panel-actions">
+          <span class="chip">${rows.length} matches</span>
+          <button class="btn-icon" data-export="tblMatches">Export CSV</button>
+        </div>
+      </div>
+      <div class="filters" style="margin-bottom:4px;flex-wrap:wrap;row-gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Home Priority:
+          <select id="mHomeFilter" class="select">
+            <option value="">All</option>
+            ${homeOpts.map(v => `<option value="${esc(v)}"${STATE.matchesHomeFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Away Priority:
+          <select id="mAwayFilter" class="select">
+            <option value="">All</option>
+            ${awayOpts.map(v => `<option value="${esc(v)}"${STATE.matchesAwayFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Priority:
+          <select id="mPriorityFilter" class="select">
+            <option value="">All priorities</option>
+            ${priorityLabels.map(p => `<option value="${esc(p)}"${STATE.matchesPriorityFilter===p?' selected':''}>${esc(p)}</option>`).join('')}
+          </select>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;">
+            <input type="checkbox" id="mPriorityExclude"${STATE.matchesPriorityExclude?' checked':''}>
+            Exclude
+          </label>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Exclude IDs:
+          <input id="mExcludeIds" class="input" type="text" placeholder="id1, id2, …"
+            value="${esc(STATE.matchesExcludeIds)}" style="width:200px;">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Outlier (delivery_time):
+          <select id="mOutlierOp" class="select">
+            <option value="">— none —</option>
+            <option value="above"${STATE.matchesOutlierOp==='above'?' selected':''}>above</option>
+            <option value="below"${STATE.matchesOutlierOp==='below'?' selected':''}>below</option>
+          </select>
+          <input id="mOutlierVal" class="input" type="number" placeholder="hours"
+            value="${esc(STATE.matchesOutlierVal)}" style="width:80px;">
+        </label>
+        <button id="mApplyFilters" class="btn btn-primary">Apply</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3 class="panel-title">Priority distribution</h3></div>
+      <div class="chart-wrap short"><canvas id="chartMatchesPriority"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">All matches</h3>
+        <div class="panel-actions">
+          <span class="chip">${rows.length} rows</span>
+          <button class="btn-icon" data-export="tblMatches">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblMatches"></table></div>
+    </div>
+  `;
+
+  // Wire filter controls — immediate-change selects
+  document.getElementById('mHomeFilter').addEventListener('change', e => {
+    STATE.matchesHomeFilter = e.target.value; loadMatchesPage();
+  });
+  document.getElementById('mAwayFilter').addEventListener('change', e => {
+    STATE.matchesAwayFilter = e.target.value; loadMatchesPage();
+  });
+  document.getElementById('mPriorityFilter').addEventListener('change', e => {
+    STATE.matchesPriorityFilter = e.target.value; loadMatchesPage();
+  });
+  document.getElementById('mPriorityExclude').addEventListener('change', e => {
+    STATE.matchesPriorityExclude = e.target.checked; loadMatchesPage();
+  });
+  // Apply button reads text/number inputs
+  document.getElementById('mApplyFilters').addEventListener('click', () => {
+    STATE.matchesExcludeIds  = document.getElementById('mExcludeIds').value.trim();
+    STATE.matchesOutlierOp   = document.getElementById('mOutlierOp').value;
+    STATE.matchesOutlierVal  = document.getElementById('mOutlierVal').value.trim();
+    loadMatchesPage();
+  });
+
+  // Priority bar chart (color per bar)
+  destroyChart('chartMatchesPriority');
+  const pCtx = document.getElementById('chartMatchesPriority');
+  if (pCtx) {
+    CHARTS['chartMatchesPriority'] = new Chart(pCtx, {
+      type: 'bar',
+      data: {
+        labels: priorityLabels,
+        datasets: [{
+          label: 'Matches',
+          data: priorityLabels.map(p => priorityCounts[p] || 0),
+          backgroundColor: priorityLabels.map(p => MATCHES_PRIORITY_COLORS[p] || '#e2e8f0'),
+          borderRadius: 4, maxBarThickness: 80,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { intersect: false } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+  }
+
+  renderTable('tblMatches', MATCHES_DISPLAY_COLS, rows);
+}
+
+// ============================================================
+// Matches — grouped performance panels (daily / weekly / monthly)
+// ============================================================
+function buildMatchesGrouped(rows, keyFn, keyLabel) {
+  const priorityLabels = [...PRIORITY_ORDER, 'Other'];
+  const groupMap = {};
+  rows.forEach(r => {
+    const key = keyFn(r.first_collection_complete);
+    if (!key || key === 'Unknown') return;
+    if (!groupMap[key]) groupMap[key] = { key, rows: [] };
+    groupMap[key].rows.push(r);
+  });
+
+  const sorted = Object.keys(groupMap).sort();
+  const tableRows = sorted.map(k => {
+    const g = groupMap[k];
+    const total = g.rows.length;
+    const dtVals = g.rows
+      .map(r => parseFloat(r.delivery_time))
+      .filter(v => !isNaN(v) && isFinite(v));
+    const avgDt = dtVals.length
+      ? Math.round((dtVals.reduce((a, b) => a + b, 0) / dtVals.length) * 10) / 10
+      : null;
+    const byCat = {};
+    priorityLabels.forEach(p => {
+      byCat[p] = g.rows.filter(r => r.priority === p).length;
+    });
+    return { [keyLabel]: k, total, avg_delivery: avgDt, ...byCat };
+  });
+
+  const cols = [
+    { key: keyLabel, label: keyLabel },
+    { key: 'total',        label: 'Total',            num: true },
+    { key: 'avg_delivery', label: 'Avg Delivery (h)', num: true },
+    ...priorityLabels.map(p => ({ key: p, label: p, num: true })),
+  ];
+
+  // Chart datasets — one per priority
+  const chartLabels = sorted;
+  const datasets = priorityLabels.map(p => ({
+    label: p,
+    data: sorted.map(k => groupMap[k].rows.filter(r => r.priority === p).length),
+    backgroundColor: MATCHES_PRIORITY_COLORS[p] || '#e2e8f0',
+    borderRadius: 2,
+  }));
+
+  return { tableRows, cols, chartLabels, datasets };
+}
+
+async function loadMatchesDaily() {
+  const panel = document.getElementById('panel-matches-daily');
+  if (!panel) return;
+  const rows = await loadMatchesData();
+
+  const keyFn = dateStr => (dateStr || '').slice(0, 10);
+  const { tableRows, cols, chartLabels, datasets } =
+    buildMatchesGrouped(rows, keyFn, 'Date');
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Daily performance</h3>
+        <div class="panel-actions">
+          <span class="chip">${tableRows.length} days</span>
+          <button class="btn-icon" data-export="tblMatchesDaily">Export CSV</button>
+        </div>
+      </div>
+      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
+      <div class="chart-wrap"><canvas id="chartMatchesDaily"></canvas></div>
+      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesDaily"></table></div>
+    </div>
+  `;
+
+  stackedBar('chartMatchesDaily', chartLabels, datasets);
+  renderTable('tblMatchesDaily', cols, tableRows);
+}
+
+async function loadMatchesWeekly() {
+  const panel = document.getElementById('panel-matches-weekly');
+  if (!panel) return;
+  const rows = await loadMatchesData();
+
+  const { tableRows, cols, chartLabels, datasets } =
+    buildMatchesGrouped(rows, getWeekLabel, 'Week');
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Weekly performance</h3>
+        <div class="panel-actions">
+          <span class="chip">${tableRows.length} weeks</span>
+          <button class="btn-icon" data-export="tblMatchesWeekly">Export CSV</button>
+        </div>
+      </div>
+      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
+      <div class="chart-wrap"><canvas id="chartMatchesWeekly"></canvas></div>
+      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesWeekly"></table></div>
+    </div>
+  `;
+
+  stackedBar('chartMatchesWeekly', chartLabels, datasets);
+  renderTable('tblMatchesWeekly', cols, tableRows);
+}
+
+async function loadMatchesMonthly() {
+  const panel = document.getElementById('panel-matches-monthly');
+  if (!panel) return;
+  const rows = await loadMatchesData();
+
+  const { tableRows, cols, chartLabels, datasets } =
+    buildMatchesGrouped(rows, getMonthLabel, 'Month');
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Monthly performance</h3>
+        <div class="panel-actions">
+          <span class="chip">${tableRows.length} months</span>
+          <button class="btn-icon" data-export="tblMatchesMonthly">Export CSV</button>
+        </div>
+      </div>
+      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
+      <div class="chart-wrap"><canvas id="chartMatchesMonthly"></canvas></div>
+      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesMonthly"></table></div>
+    </div>
+  `;
+
+  stackedBar('chartMatchesMonthly', chartLabels, datasets);
+  renderTable('tblMatchesMonthly', cols, tableRows);
+}
+
+// ============================================================
 // CSV Import
 // ============================================================
 const IMPORT_CONFIG = {
@@ -2575,6 +2999,22 @@ const IMPORT_CONFIG = {
       },
     },
     requiredCols: ['match_id', 'code'],
+  },
+  matches: {
+    // Columns A-S map positionally; also matches by header name
+    dbCols: [
+      'matchid','match_name','match_kick_off','game_sla',
+      'priority_sb_competition','ops_priority_competition',
+      'priority_sb_home','ops_priority_home',
+      'priority_sb_away','ops_priority_away',
+      'game_due_date','first_collection_complete',
+      'a_review_date','match_review_started','match_review_ended',
+      'sla_breached','breach_hours','match_review_time_taken_hours',
+      'delivery_time','last_modified',
+    ],
+    aliases: {},
+    positional: true,       // fall back to column-index if header names don't match
+    requiredCols: ['matchid'],
   },
 };
 function normKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
@@ -2691,6 +3131,15 @@ async function runImport() {
     const i = headerNorm[normKey(dbCol)];
     if (i !== undefined) mapping[dbCol] = i;
   });
+  // Positional fallback — for tables with positional: true, map unmapped cols by index
+  if (cfg.positional) {
+    cfg.dbCols.forEach((dbCol, idx) => {
+      if (!(dbCol in mapping) && idx < header.length) {
+        mapping[dbCol] = idx;
+      }
+    });
+  }
+
   const found = Object.keys(mapping);
   const missing = cfg.dbCols.filter(c => !(c in mapping));
   impLog(`Header cols detected: ${header.length}. Mapped ${found.length}/${cfg.dbCols.length} DB cols. Missing: ${missing.join(', ') || '(none)'}`);
