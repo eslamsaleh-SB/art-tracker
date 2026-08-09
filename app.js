@@ -696,6 +696,7 @@ async function loadOverview(R) {
     WHERE assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3 OR team LIKE ?3)
       ${ef.sql}
+      ${overlapClause('assignments')}
   `, [start, end, like, ...ef.args])).rows[0] || {};
 
   // Overall avg = avg of per-(match, code) totals, deduped so multi-task
@@ -712,6 +713,7 @@ async function loadOverview(R) {
           AND a.assignment_date BETWEEN ?1 AND ?2
           AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
           ${efA.sql}
+          ${overlapClause('a')}
       )
       GROUP BY dl.matchid, dl.code
     )
@@ -731,6 +733,7 @@ async function loadOverview(R) {
           AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
           AND a.task IS NOT NULL AND a.task <> ''
           ${efA.sql}
+          ${overlapClause('a')}
         GROUP BY a.task, a.match_id, a.code, a.half, a.side
       )
       GROUP BY task HAVING samples >= 5
@@ -1247,6 +1250,7 @@ async function loadReviewers(R) {
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
       ${efA.sql}
+      ${overlapClause('a')}
       AND a.task = ${taskParam}
     GROUP BY code
   `, args)).rows;
@@ -1266,6 +1270,7 @@ async function loadReviewers(R) {
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
         ${efA.sql}
+        ${overlapClause('a')}
         AND a.task = ${taskParam}
       GROUP BY a.code, a.match_id, a.half, a.side
     )
@@ -1889,6 +1894,7 @@ async function loadExtraTable(R, opt) {
       FROM ${table} a
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.code LIKE ?3)
+        ${overlapClause('a')}
     )
   `, args)).rows[0] || {};
 
@@ -1928,6 +1934,7 @@ async function loadExtraTable(R, opt) {
     FROM ${table} a
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.code LIKE ?3)
+      ${overlapClause('a')}
     GROUP BY a.code
     ORDER BY assignments DESC
     LIMIT 500
@@ -2499,6 +2506,7 @@ async function loadHours(R) {
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       ${ef.sql}
+      ${overlapClause('a')}
     GROUP BY a.code, a.reviewer_name, a.team, bucket
     ORDER BY bucket DESC, actual DESC
     LIMIT 5000
