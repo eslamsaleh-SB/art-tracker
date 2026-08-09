@@ -341,6 +341,7 @@ const STATE = {
   atMode: '',          // Actual Time filter: '' | 'lt' | 'between'
   atMin: null,
   atMax: null,
+  timeliness: '',      // '' | 'ontime' | 'late' — filter by 24h rule vs. assignment_date
   rowsPage: 1,
   rowsPerPage: 500,
   rowsTotal: 0,
@@ -1458,7 +1459,23 @@ async function loadRows(R) {
     const base = expByTask[a.task];
     const expected = (base != null) ? base / scale : null;
     const diff = (expected != null) ? (actual - expected) : null;
+    // Timeliness — hours from assignment_date to FIRST relevant log
+    let hoursSince = null;
+    let firstLogTs = null;
+    targetPartids.forEach(pid => {
+      const rows = partMap[pid];
+      if (rows && rows.length && (firstLogTs === null || rows[0].ts < firstLogTs)) firstLogTs = rows[0].ts;
+    });
+    if (firstLogTs) {
+      const assignTs = new Date(a.assignment_date).getTime();
+      if (!isNaN(assignTs)) hoursSince = (firstLogTs - assignTs) / (3600 * 1000);
+    }
     const noteParts = [];
+    if (hoursSince != null && hoursSince > 24) {
+      const days = Math.floor(hoursSince / 24);
+      const hrs  = Math.round(hoursSince - days * 24);
+      noteParts.push(`⚠ Reviewed ${days}d ${hrs}h after assignment`);
+    }
     if (lateDays.size) {
       noteParts.push('Additional logs after (' + Array.from(lateDays).sort((x,y)=>x-y).map(d => d + ' day' + (d===1?'':'s')).join(', ') + ')');
     }
@@ -1474,6 +1491,7 @@ async function loadRows(R) {
       expected,
       diff,
       scale,
+      hours_since_assigned: hoursSince,
       notes,
     };
   });
@@ -1485,6 +1503,12 @@ async function loadRows(R) {
   } else if (STATE.atMode === 'between' && STATE.atMin != null && STATE.atMax != null) {
     filtered = filtered.filter(r =>
       r.actual != null && r.actual >= STATE.atMin && r.actual <= STATE.atMax);
+  }
+  // Timeliness filter — on-time (≤24h) / late (>24h) vs assignment_date
+  if (STATE.timeliness === 'ontime') {
+    filtered = filtered.filter(r => r.hours_since_assigned != null && r.hours_since_assigned <= 24);
+  } else if (STATE.timeliness === 'late') {
+    filtered = filtered.filter(r => r.hours_since_assigned != null && r.hours_since_assigned > 24);
   }
 
   const TBL = 'comments_assignments';
@@ -1697,6 +1721,20 @@ function wireActualTimeFilter(suffix, viewName) {
 wireActualTimeFilter('', 'rows');
 wireActualTimeFilter('Players', 'players');
 wireActualTimeFilter('Bc', 'bc');
+
+// Timeliness filter — 3 sync'd dropdowns, all write STATE.timeliness
+['', 'Players', 'Bc'].forEach(suffix => {
+  const el = document.getElementById('timelinessFilter' + suffix);
+  if (!el) return;
+  el.addEventListener('change', e => {
+    STATE.timeliness = e.target.value;
+    ['', 'Players', 'Bc'].forEach(s => {
+      const o = document.getElementById('timelinessFilter' + s);
+      if (o) o.value = STATE.timeliness;
+    });
+    refresh();
+  });
+});
 
 // CSV Export buttons — one delegated handler for every `data-export` attr
 document.body.addEventListener('click', e => {
@@ -1970,6 +2008,12 @@ async function loadExtraTable(R, opt) {
     filteredRows = rows.filter(r => r.actual_time != null && r.actual_time < STATE.atMin);
   } else if (STATE.atMode === 'between' && STATE.atMin != null && STATE.atMax != null) {
     filteredRows = rows.filter(r => r.actual_time != null && r.actual_time >= STATE.atMin && r.actual_time <= STATE.atMax);
+  }
+  // Timeliness filter
+  if (STATE.timeliness === 'ontime') {
+    filteredRows = filteredRows.filter(r => parseFloat(r.hours_since_assigned) <= 24);
+  } else if (STATE.timeliness === 'late') {
+    filteredRows = filteredRows.filter(r => parseFloat(r.hours_since_assigned) > 24);
   }
   const TBL = kind === 'players' ? 'comments_players_assignments' : 'comments_bc_assignments';
   const FID = kind === 'players' ? 'cmFilter_players_assignments' : 'cmFilter_bc_assignments';
