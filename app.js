@@ -2647,16 +2647,37 @@ function stackedBar(canvasId, labels, datasets) {
 }
 
 // ============================================================
-// Matches — core data loader (fetches + filters JS-side)
+// Matches — core data loader (all filters pushed to SQL)
 // ============================================================
 async function loadMatchesData() {
-  const { rows } = await query(`SELECT * FROM quality_delivery_time ORDER BY first_collection_complete DESC`);
+  const conditions = [];
+  const params = {};
+  let paramIdx = 1;
 
-  let filtered = rows;
-
-  // Match ID filter
+  // Match ID
   if (STATE.matchesMatchId) {
-    filtered = filtered.filter(r => r.matchid === STATE.matchesMatchId);
+    conditions.push(`matchid = ?${paramIdx}`);
+    params[paramIdx++] = STATE.matchesMatchId;
+  }
+
+  // SLA filter
+  if (STATE.matchesSlaFilter) {
+    if (STATE.matchesSlaExclude) {
+      conditions.push(`(game_sla IS NULL OR game_sla <> ?${paramIdx})`);
+    } else {
+      conditions.push(`game_sla = ?${paramIdx}`);
+    }
+    params[paramIdx++] = STATE.matchesSlaFilter;
+  }
+
+  // Home / away priority
+  if (STATE.matchesHomeFilter) {
+    conditions.push(`priority_sb_home = ?${paramIdx}`);
+    params[paramIdx++] = STATE.matchesHomeFilter;
+  }
+  if (STATE.matchesAwayFilter) {
+    conditions.push(`priority_sb_away = ?${paramIdx}`);
+    params[paramIdx++] = STATE.matchesAwayFilter;
   }
 
   // Outlier filter on delivery_time
@@ -2664,51 +2685,39 @@ async function loadMatchesData() {
     const threshold = parseFloat(STATE.matchesOutlierVal);
     if (!isNaN(threshold)) {
       if (STATE.matchesOutlierOp === 'above') {
-        filtered = filtered.filter(r => {
-          const v = parseFloat(r.delivery_time);
-          return isNaN(v) || v <= threshold;
-        });
-      } else if (STATE.matchesOutlierOp === 'below') {
-        filtered = filtered.filter(r => {
-          const v = parseFloat(r.delivery_time);
-          return isNaN(v) || v >= threshold;
-        });
+        // Exclude outliers above threshold
+        conditions.push(`(CAST(delivery_time AS REAL) <= ?${paramIdx} OR delivery_time IS NULL)`);
+      } else {
+        conditions.push(`(CAST(delivery_time AS REAL) >= ?${paramIdx} OR delivery_time IS NULL)`);
       }
+      params[paramIdx++] = threshold;
     }
   }
 
-  // SLA filter
-  if (STATE.matchesSlaFilter) {
-    if (STATE.matchesSlaExclude) {
-      filtered = filtered.filter(r => (r.game_sla || '') !== STATE.matchesSlaFilter);
-    } else {
-      filtered = filtered.filter(r => (r.game_sla || '') === STATE.matchesSlaFilter);
-    }
-  }
-
-  // Home / away priority column filters
-  if (STATE.matchesHomeFilter) {
-    filtered = filtered.filter(r => (r.priority_sb_home || '') === STATE.matchesHomeFilter);
-  }
-  if (STATE.matchesAwayFilter) {
-    filtered = filtered.filter(r => (r.priority_sb_away || '') === STATE.matchesAwayFilter);
-  }
-
-  // Date range filter (used by weekly/monthly)
-  if (STATE.matchesDateFrom) {
-    filtered = filtered.filter(r => {
+  // Date range — first_collection_complete stored as US format "M/D/YYYY H:MM"
+  // Use SUBSTR trick: compare by casting to ISO via strftime where possible,
+  // but since format is US, compare using the stored value with a JS-parsed boundary.
+  // Safest: fetch with no date filter and do date comparison JS-side only when needed.
+  // For weekly/monthly we pass explicit date range, so filter here via string matching on year-month prefix.
+  if (STATE.matchesDateFrom || STATE.matchesDateTo) {
+    // We still need JS-side date filter here because the stored format is US "M/D/YYYY H:MM"
+    // which SQLite can't compare directly. Fetch with all other filters applied, then date-filter in JS.
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `SELECT * FROM quality_delivery_time ${where} ORDER BY first_collection_complete DESC`;
+    const { rows } = await query(sql, Object.values(params));
+    return rows.filter(r => {
       const iso = parseDateToISO(r.first_collection_complete);
-      return iso && iso >= STATE.matchesDateFrom;
-    });
-  }
-  if (STATE.matchesDateTo) {
-    filtered = filtered.filter(r => {
-      const iso = parseDateToISO(r.first_collection_complete);
-      return iso && iso <= STATE.matchesDateTo;
+      if (!iso) return false;
+      if (STATE.matchesDateFrom && iso < STATE.matchesDateFrom) return false;
+      if (STATE.matchesDateTo   && iso > STATE.matchesDateTo)   return false;
+      return true;
     });
   }
 
-  return filtered;
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const sql = `SELECT * FROM quality_delivery_time ${where} ORDER BY first_collection_complete DESC`;
+  const { rows } = await query(sql, Object.values(params));
+  return rows;
 }
 
 // ============================================================
