@@ -392,7 +392,7 @@ function ruleActualExpr(aliasA, aliasDL) {
 // State
 // ============================================================
 const STATE = {
-  view: 'overview',
+  view: 'deliver_details',
   range: '12m',
   customStart: '',
   customEnd: '',
@@ -435,6 +435,8 @@ const STATE = {
   matchesDateTo: '',
   matchesBarMonth: '',    // bar chart month filter (YYYY-MM, '' = current month)
   matchesBarWeek: '',     // bar chart week filter (YYYY-MM-DD Sunday, '' = all weeks in selected month)
+  detailsQdtMin: '',      // Deliver Time Details raw table — min delivery_time filter
+  detailsQdtMax: '',      // Deliver Time Details raw table — max delivery_time filter
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -613,8 +615,8 @@ function setView(name) {
     players_partial: 'Players — Partial Coverage',
     nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
-    matches: 'Matches',
-    matches_weekly: 'Matches — Weekly Performance', matches_monthly: 'Matches — Monthly Performance',
+    matches: 'Quality Delivery Time',
+    matches_weekly: 'Quality Delivery Time — Weekly', matches_monthly: 'Quality Delivery Time — Monthly',
     deliver_details: 'Deliver Time Details',
   }[name] || name;
   refresh();
@@ -2945,7 +2947,7 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
   const cols = [
     { key: keyLabel, label: keyLabel, raw: !!keyRender, render: keyRender },
     { key: 'total',  label: 'Total Matches', num: true },
-    ...slaLabels.map(s => ({ key: 'sla_' + s, label: 'SLA ' + s + ' — Avg Delivery (H)', num: true })),
+    ...slaLabels.map(s => ({ key: 'sla_' + s, label: String(s), num: true })),
   ];
 
   // Line chart datasets: one line per SLA, y = avg delivery_time
@@ -3291,6 +3293,17 @@ async function loadDeliverTimeDetails() {
     showDateRange: true,
   });
 
+  // Apply QDT filter to raw rows
+  let rawRows = result.allRows;
+  if (STATE.detailsQdtMin !== '') {
+    const mn = parseFloat(STATE.detailsQdtMin);
+    if (!isNaN(mn)) rawRows = rawRows.filter(r => parseFloat(r.delivery_time) >= mn);
+  }
+  if (STATE.detailsQdtMax !== '') {
+    const mx = parseFloat(STATE.detailsQdtMax);
+    if (!isNaN(mx)) rawRows = rawRows.filter(r => parseFloat(r.delivery_time) <= mx);
+  }
+
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
@@ -3308,20 +3321,48 @@ async function loadDeliverTimeDetails() {
         </div>
       </div>
       <div class="table-wrap" style="margin-bottom:24px;"><table id="tblDetailsSummary"></table></div>
-      <div class="panel-header">
+      <div class="panel-header" style="margin-top:8px;">
         <h3 class="panel-title">Raw Match Data</h3>
         <div class="panel-actions">
-          <span class="chip">${rows.length} matches</span>
+          <span class="chip" id="qdtRawCount">${rawRows.length} matches</span>
           <button class="btn-icon" data-export="tblDetailsRaw">Export CSV</button>
         </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0 12px;">
+        <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
+          Quality Delivery Time ≥
+          <input id="qdtMinInput" type="number" min="0" step="0.1" value="${STATE.detailsQdtMin}"
+            placeholder="Min (H)"
+            style="width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--text);font-size:12px;">
+        </label>
+        <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
+          ≤
+          <input id="qdtMaxInput" type="number" min="0" step="0.1" value="${STATE.detailsQdtMax}"
+            placeholder="Max (H)"
+            style="width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--text);font-size:12px;">
+        </label>
+        <button id="qdtFilterBtn" class="btn-icon">Apply</button>
+        <button id="qdtClearBtn" class="btn-icon" style="opacity:0.7;">Clear</button>
       </div>
       <div class="table-wrap"><table id="tblDetailsRaw"></table></div>
     </div>
   `;
 
   wireMatchesFilters('details', loadDeliverTimeDetails);
+
+  document.getElementById('qdtFilterBtn')?.addEventListener('click', () => {
+    STATE.detailsQdtMin = document.getElementById('qdtMinInput')?.value || '';
+    STATE.detailsQdtMax = document.getElementById('qdtMaxInput')?.value || '';
+    loadDeliverTimeDetails();
+  });
+  document.getElementById('qdtClearBtn')?.addEventListener('click', () => {
+    STATE.detailsQdtMin = '';
+    STATE.detailsQdtMax = '';
+    loadDeliverTimeDetails();
+  });
+
   renderTable('tblDetailsSummary', result.cols, result.tableRows);
-  renderTable('tblDetailsRaw', RAW_MATCH_COLS, result.allRows);
+  renderTable('tblDetailsRaw', RAW_MATCH_COLS, rawRows);
 }
 
 // ============================================================
