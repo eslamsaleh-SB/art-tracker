@@ -423,6 +423,7 @@ const STATE = {
   lastRows: {},        // { tblId: [rows] } — for CSV export
   // Matches filters — shared across all 4 matches views
   matchesMatchId: '',      // selected match ID from dropdown ('' = all)
+  matchesMatchIds: [],      // multi-select match IDs ([] = all)
   matchesSlaFilter: '',    // selected SLA value to filter by ('' = all)
   matchesSlaExclude: false, // if true, EXCLUDE that SLA; if false, show ONLY that SLA
   matchesOutlierOp: '',
@@ -2866,7 +2867,7 @@ async function loadMatchesPage() {
         labels: slaChartLabels,
         datasets: [{ label: 'Matches',
           data: slaChartLabels.map(s => slaCounts[s] || 0),
-          backgroundColor: SLA_COLORS[0],
+          backgroundColor: getSlaColor('__matches__'),
           borderRadius: 4 }],
       },
       options: {
@@ -2886,7 +2887,20 @@ async function loadMatchesPage() {
 // ============================================================
 // Matches — grouped performance panels (daily / weekly / monthly)
 // ============================================================
-const SLA_COLORS = ['#3b82f6','#22c55e','#f97316','#a855f7','#ef4444','#14b8a6','#f59e0b','#64748b'];
+const SLA_COLOR_PALETTE = [
+  '#3b82f6','#22c55e','#f97316','#a855f7','#ef4444',
+  '#14b8a6','#f59e0b','#64748b','#ec4899','#06b6d4',
+  '#84cc16','#8b5cf6','#f43f5e','#10b981','#fb923c',
+  '#6366f1','#0ea5e9','#d946ef','#a3e635','#fbbf24',
+];
+const _slaColorCache = {};
+function getSlaColor(slaVal) {
+  const key = String(slaVal || '');
+  if (_slaColorCache[key] !== undefined) return _slaColorCache[key];
+  const idx = Object.keys(_slaColorCache).length % SLA_COLOR_PALETTE.length;
+  _slaColorCache[key] = SLA_COLOR_PALETTE[idx];
+  return _slaColorCache[key];
+}
 
 function buildMatchesGrouped(rows, keyFn, keyLabel) {
   // Collect distinct SLA values across filtered rows
@@ -2914,9 +2928,21 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
     const avgDt = dtVals.length
       ? Math.round((dtVals.reduce((a, b) => a + b, 0) / dtVals.length) * 10) / 10
       : null;
+    const rtVals = g.rows.map(r => parseFloat(r.match_review_time_taken_hours)).filter(v => !isNaN(v) && isFinite(v));
+    const avgRt = rtVals.length
+      ? Math.round((rtVals.reduce((a, b) => a + b, 0) / rtVals.length) * 10) / 10
+      : null;
     const bySla = {};
-    slaLabels.forEach(s => { bySla[s] = g.rows.filter(r => (r.game_sla || '—') === s).length; });
-    return { [keyLabel]: k, total, avg_delivery: avgDt, ...bySla };
+    const artBySla = {};
+    slaLabels.forEach(s => {
+      const slaRows = g.rows.filter(r => (r.game_sla || '—') === s);
+      bySla[s] = slaRows.length;
+      const artVals = slaRows.map(r => parseFloat(r.match_review_time_taken_hours)).filter(v => !isNaN(v) && isFinite(v));
+      artBySla['art_' + s] = artVals.length
+        ? Math.round((artVals.reduce((a, b) => a + b, 0) / artVals.length) * 10) / 10
+        : null;
+    });
+    return { [keyLabel]: k, total, avg_delivery: avgDt, avg_review: avgRt, ...artBySla, _bySla: bySla };
   });
 
   // For month keys (YYYY-MM) show friendly label; weeks/days show as-is
@@ -2924,45 +2950,138 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
   const keyRender = isMonth ? (r => fmtMonthLabel(r[keyLabel])) : null;
   const cols = [
     { key: keyLabel, label: keyLabel, raw: !!keyRender, render: keyRender },
-    { key: 'total',        label: 'Total',            num: true },
-    { key: 'avg_delivery', label: 'Avg Delivery (h)', num: true },
-    ...slaLabels.map(s => ({ key: s, label: `SLA: ${s}`, num: true })),
+    { key: 'total',       label: 'Total Matches',        num: true },
+    { key: 'avg_review',  label: 'Avg Review Time (H)',  num: true },
+    ...slaLabels.map(s => ({ key: 'art_' + s, label: 'ART — SLA: ' + s, num: true })),
   ];
 
-  // Stacked bar chart datasets grouped by game_sla
-  const slaDatasets = slaLabels.map((s, i) => ({
-    label: s,
-    data: sorted.map(k => groupMap[k].rows.filter(r => (r.game_sla || '—') === s).length),
-    backgroundColor: SLA_COLORS[i % SLA_COLORS.length],
+  // Stacked bar chart datasets: avg delivery_time per SLA per period
+  const slaDatasets = slaLabels.map(s => ({
+    label: 'SLA: ' + s,
+    data: sorted.map(k => {
+      const g = groupMap[k];
+      const slaRows = g.rows.filter(r => (r.game_sla || '—') === s);
+      if (!slaRows.length) return 0;
+      const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v));
+      return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : 0;
+    }),
+    backgroundColor: getSlaColor(s),
     borderRadius: 2,
   }));
 
   // For monthly keys (YYYY-MM) convert chart labels to friendly names
   const displayLabels = isMonth ? sorted.map(fmtMonthLabel) : sorted;
-  return { tableRows, cols, chartLabels: displayLabels, sortedKeys: sorted, slaDatasets };
+  return { tableRows, cols, chartLabels: displayLabels, sortedKeys: sorted, slaDatasets, slaLabels, groupMap, sorted, allRows: rows };
 }
 
+const RAW_MATCH_COLS = [
+  { key: 'matchid',                        label: 'Match ID' },
+  { key: 'match_kick_off',                 label: 'Match Date' },
+  { key: 'game_sla', label: 'SLA', raw: true, render: r => {
+    const c = getSlaColor(r.game_sla || '');
+    return `<span style="background:${c}22;color:${c};border:1px solid ${c}44;border-radius:4px;padding:1px 6px;font-size:11px;white-space:nowrap">SLA ${r.game_sla || '—'}</span>`;
+  }},
+  { key: 'priority_sb_competition',        label: 'Assignee' },
+  { key: 'priority_sb_home',               label: 'Home Priority' },
+  { key: 'priority_sb_away',               label: 'Away Priority' },
+  { key: 'sla_breached',                   label: 'SLA Status' },
+  { key: 'delivery_time',                  label: 'Delivery Time (H)', num: true },
+  { key: 'match_review_time_taken_hours',  label: 'Review Time (H)',   num: true },
+];
+
 function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, data, filterHTML = '') {
-  const { chartLabels, slaDatasets } = data;
+  const { chartLabels, slaDatasets, slaLabels = [], groupMap = {}, sorted = [], allRows = [] } = data;
+
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
         <h3 class="panel-title">${title}</h3>
         <div class="panel-actions">
-          <span class="chip">${tableRows.length} rows</span>
+          <span class="chip">${tableRows.length} periods</span>
           <button class="btn-icon" data-export="${exportId}">Export CSV</button>
         </div>
       </div>
       ${filterHTML}
-      <div class="chart-wrap" style="margin-bottom:12px;"><canvas id="chartMSla_${exportId}"></canvas></div>
-      <div class="table-wrap"><table id="${exportId}"></table></div>
+      <div class="table-wrap" style="margin-bottom:16px;"><table id="${exportId}"></table></div>
+      <div class="chart-wrap" style="margin-bottom:16px;height:400px;"><canvas id="chartMSla_${exportId}"></canvas></div>
+      <div class="panel-header"><h3 class="panel-title">SLA Performance Trends</h3></div>
+      <div id="slatrends_${exportId}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:16px;"></div>
+      <div class="panel-header">
+        <h3 class="panel-title">Raw Match Data</h3>
+        <div class="panel-actions">
+          <span class="chip" id="rawCount_${exportId}"></span>
+          <button class="btn-icon" data-export="tblRaw_${exportId}">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblRaw_${exportId}"></table></div>
     </div>
   `;
 
-  // SLA stacked bar
-  stackedBar(`chartMSla_${exportId}`, chartLabels, slaDatasets);
-
+  // 1. Summary table
   renderTable(exportId, cols, tableRows);
+
+  // 2. Horizontal stacked bar — avg delivery time per SLA per period
+  destroyChart(`chartMSla_${exportId}`);
+  const ctx = document.getElementById(`chartMSla_${exportId}`);
+  if (ctx) {
+    CHARTS[`chartMSla_${exportId}`] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: chartLabels, datasets: slaDatasets },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'top', labels: { boxWidth: 10 } },
+          tooltip: { mode: 'index' },
+        },
+        scales: {
+          x: { stacked: true, beginAtZero: true, grid: { color: css('--border') }, title: { display: true, text: 'Avg Delivery Time (H)' } },
+          y: { stacked: true, grid: { display: false } },
+        },
+      },
+    });
+  }
+
+  // 3. SLA trend charts (one small line chart per SLA value)
+  slaLabels.forEach(s => {
+    const color = getSlaColor(s);
+    const cid = `chartMTrend_${s.replace(/[^a-z0-9]/gi, '_')}_${exportId}`;
+    const perPeriodData = sorted.map(k => {
+      const slaRows = groupMap[k].rows.filter(r => (r.game_sla || '—') === s);
+      const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v));
+      return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : null;
+    });
+    const container = document.getElementById(`slatrends_${exportId}`);
+    if (!container) return;
+    const div = document.createElement('div');
+    div.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;';
+    div.innerHTML = `<div style="font-size:11px;font-weight:600;margin-bottom:6px;color:${color}">SLA: ${s}</div><div style="height:100px;"><canvas id="${cid}"></canvas></div>`;
+    container.appendChild(div);
+    destroyChart(cid);
+    const tCtx = document.getElementById(cid);
+    if (!tCtx) return;
+    CHARTS[cid] = new Chart(tCtx, {
+      type: 'line',
+      data: {
+        labels: chartLabels,
+        datasets: [{ label: `SLA ${s}`, data: perPeriodData, borderColor: color, backgroundColor: color + '33',
+          tension: 0.3, pointRadius: 2, fill: false }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0, font: { size: 9 } } },
+          y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { font: { size: 9 } } },
+        },
+      },
+    });
+  });
+
+  // 4. Raw match data table
+  renderTable('tblRaw_' + exportId, RAW_MATCH_COLS, allRows);
+  const rawCountEl = document.getElementById('rawCount_' + exportId);
+  if (rawCountEl) rawCountEl.textContent = allRows.length + ' matches';
 }
 
 async function loadMatchesDaily() {
