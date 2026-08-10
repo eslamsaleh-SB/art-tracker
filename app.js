@@ -3099,37 +3099,52 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
   // 1. Summary table
   renderTable(exportId, cols, tableRows);
 
-  // 2. Multi-line chart — one line per SLA, filtered to selected month/week
+  // 2. Horizontal bar chart — one bar per SLA, filtered to selected month/week
   destroyChart(`chartMSla_${exportId}`);
   const ctx = document.getElementById(`chartMSla_${exportId}`);
   if (ctx) {
+    // For a horizontal bar: one dataset per SLA, each with one value (avg delivery for that SLA in the selected period)
+    const barChartLabels = barDatasets.map(ds => ds.label);
+    const barChartData = barDatasets.map(ds => {
+      const vals = ds.data.filter(v => v != null);
+      return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : null;
+    });
+    const barChartColors = barDatasets.map(ds => ds.borderColor);
     CHARTS[`chartMSla_${exportId}`] = new Chart(ctx, {
-      type: 'line',
-      data: { labels: barLabels, datasets: barDatasets },
+      type: 'bar',
+      data: {
+        labels: barChartLabels,
+        datasets: [{
+          label: 'Avg Delivery (H)',
+          data: barChartData,
+          backgroundColor: barChartColors.map(c => c + '99'),
+          borderColor: barChartColors,
+          borderWidth: 2,
+          borderRadius: 4,
+          maxBarThickness: 36,
+        }],
+      },
       plugins: typeof ChartDataLabels !== 'undefined' ? [ChartDataLabels] : [],
       options: {
+        indexAxis: 'y',
         responsive: true, maintainAspectRatio: false,
         plugins: {
-          legend: { position: 'top', labels: { boxWidth: 12, usePointStyle: true } },
-          tooltip: { mode: 'index', intersect: false },
+          legend: { display: false },
+          tooltip: { intersect: false },
           datalabels: typeof ChartDataLabels !== 'undefined' ? {
-            align: 'top',
             anchor: 'end',
-            // Only show label on the LAST non-null point of each dataset
-            formatter: (value, ctx) => {
-              const ds = ctx.dataset.data;
-              const lastIdx = ds.reduce((acc, v, i) => (v != null ? i : acc), -1);
-              return ctx.dataIndex === lastIdx ? ctx.dataset.label : null;
-            },
-            font: { size: 10, weight: '600' },
-            color: ctx2 => ctx2.dataset.borderColor,
-            padding: 2,
+            align: 'right',
+            formatter: v => v != null ? v + ' H' : '',
+            font: { size: 11, weight: '600' },
+            color: ctx2 => ctx2.dataset.borderColor[ctx2.dataIndex],
+            padding: { left: 4 },
           } : false,
         },
         scales: {
-          x: { grid: { color: css('--border') }, title: { display: true, text: 'Period' } },
-          y: { beginAtZero: true, grid: { color: css('--border') }, title: { display: true, text: 'Avg Delivery Time (H)' } },
+          x: { beginAtZero: true, grid: { color: css('--border') }, title: { display: true, text: 'Avg Delivery Time (H)' } },
+          y: { grid: { display: false } },
         },
+        layout: { padding: { right: 60 } },
       },
     });
   }
@@ -3159,13 +3174,28 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
         datasets: [{ label: `SLA ${s}`, data: perPeriodData, borderColor: color,
           backgroundColor: color + '22', tension: 0.3, pointRadius: 2, fill: false }],
       },
+      plugins: typeof ChartDataLabels !== 'undefined' ? [ChartDataLabels] : [],
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        plugins: {
+          legend: { display: false },
+          datalabels: typeof ChartDataLabels !== 'undefined' ? {
+            align: 'top',
+            anchor: 'end',
+            formatter: (value, ctx2) => {
+              const lastIdx = ctx2.dataset.data.reduce((acc, v, i) => (v != null ? i : acc), -1);
+              return ctx2.dataIndex === lastIdx && value != null ? value + 'H' : null;
+            },
+            font: { size: 9, weight: '600' },
+            color: color,
+            padding: 2,
+          } : false,
+        },
         scales: {
           x: { grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0, font: { size: 9 } } },
           y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { font: { size: 9 } } },
         },
+        layout: { padding: { right: 10, top: 16 } },
       },
     });
   });
