@@ -254,9 +254,9 @@ function fmt(n) {
 // ============================================================
 // Matches — priority + date helpers
 // ============================================================
-const PRIORITY_ORDER = ['Customer', 'Academic', 'Opponent', 'Trial'];
+const PRIORITY_ORDER = ['Customer', 'Academy', 'Trial'];
 const MATCHES_PRIORITY_COLORS = {
-  Customer: '#3b82f6', Academic: '#22c55e', Opponent: '#f97316',
+  Customer: '#3b82f6', Academy: '#22c55e',
   Trial: '#94a3b8', Other: '#e2e8f0',
 };
 
@@ -270,23 +270,28 @@ function computePriority(row) {
 }
 
 function getWeekStart(dateStr) {
-  const d = new Date(dateStr);
+  // Slice to date-only before parsing to avoid UTC↔local timezone shifts
+  const s = (dateStr || '').slice(0, 10);
+  const d = new Date(s + 'T00:00:00');
   if (isNaN(d)) return null;
-  const day = d.getDay();
+  const day = d.getDay(); // 0=Sun
   const sun = new Date(d);
   sun.setDate(d.getDate() - day);
   return sun.toISOString().slice(0, 10);
 }
 function getWeekLabel(dateStr) {
-  const s = getWeekStart(dateStr);
-  if (!s) return 'Unknown';
-  const e = new Date(s); e.setDate(e.getDate() + 6);
-  return `${s} – ${e.toISOString().slice(0, 10)}`;
+  return getWeekStart(dateStr) || 'Unknown';
 }
 function getMonthLabel(dateStr) {
-  const d = new Date(dateStr);
-  if (isNaN(d)) return 'Unknown';
-  return d.toISOString().slice(0, 7);
+  // Return sortable YYYY-MM; display layer converts to "Jan 2026"
+  const s = (dateStr || '').slice(0, 7);
+  return /^\d{4}-\d{2}$/.test(s) ? s : 'Unknown';
+}
+function fmtMonthLabel(ym) {
+  if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return ym || '';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const [y, m] = ym.split('-');
+  return `${months[parseInt(m, 10) - 1]} ${y}`;
 }
 
 const MATCHES_DISPLAY_COLS = [
@@ -423,6 +428,9 @@ const STATE = {
   matchesPriorityExclude: false,
   matchesHomeFilter: '',
   matchesAwayFilter: '',
+  matchesDailyDate: '',   // selected date for daily detail view
+  matchesDateFrom: '',    // date-range filter for weekly/monthly
+  matchesDateTo: '',
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -2566,18 +2574,27 @@ async function loadHours(R) {
     ? `substr(dl.review_started, 1, 10)`
     : `date(dl.review_started, 'weekday 0', '-7 days')`;   // Sunday start
 
-  // JOIN data_logs to assignments to inherit team/reviewer filters
+  // UNION all 3 assignment tables so hours covers all tasks
   const { rows } = await query(`
+    WITH all_asgn AS (
+      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM assignments
+      WHERE assignment_date BETWEEN ?1 AND ?2
+      UNION
+      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM players
+      WHERE assignment_date BETWEEN ?1 AND ?2
+      UNION
+      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM bc_review
+      WHERE assignment_date BETWEEN ?1 AND ?2
+    )
     SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
            ${bucketExpr} AS bucket,
            SUM(dl.actual_time_taken)  AS actual,
            SUM(dl.total_break_time)   AS break_time,
            SUM(dl.total_time_taken)   AS total,
            COUNT(DISTINCT a.match_id) AS matches
-    FROM assignments a
+    FROM all_asgn a
     JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
-    WHERE a.assignment_date BETWEEN ?1 AND ?2
-      AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
+    WHERE (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       ${ef.sql}
       ${overlapClause('a')}
     GROUP BY a.code, a.reviewer_name, a.team, bucket
@@ -2674,11 +2691,105 @@ async function loadMatchesData() {
     filtered = filtered.filter(r => (r.priority_sb_away || '') === STATE.matchesAwayFilter);
   }
 
+  // Date range filter (used by weekly/monthly)
+  if (STATE.matchesDateFrom) {
+    filtered = filtered.filter(r => (r.first_collection_complete || '') >= STATE.matchesDateFrom);
+  }
+  if (STATE.matchesDateTo) {
+    filtered = filtered.filter(r => (r.first_collection_complete || '').slice(0,10) <= STATE.matchesDateTo);
+  }
+
   return filtered;
 }
 
 // ============================================================
 // Matches — main panel (filter bar + table + priority chart)
+// ============================================================
+// Shared filter bar renderer — wires all STATE.matches* controls
+// suffix   : unique string appended to element IDs to avoid collisions
+// reloadFn : function to call after any filter change
+// opts     : { showDateRange, showDailyDate, homeOpts, awayOpts }
+// ============================================================
+async function buildMatchesFilterHTML(suffix, opts = {}) {
+  const { homeOpts = [], awayOpts = [], showDateRange = false, showDailyDate = false } = opts;
+  const priorityAll = [...PRIORITY_ORDER, 'Other'];
+  return `
+    <div class="filters" style="flex-wrap:wrap;row-gap:8px;margin-bottom:12px;">
+      ${showDailyDate ? `
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Date:
+          <input id="mDailyDate_${suffix}" type="date" class="input"
+            value="${esc(STATE.matchesDailyDate)}" style="width:150px;">
+        </label>` : ''}
+      ${showDateRange ? `
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">From:
+          <input id="mDateFrom_${suffix}" type="date" class="input"
+            value="${esc(STATE.matchesDateFrom)}" style="width:140px;">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">To:
+          <input id="mDateTo_${suffix}" type="date" class="input"
+            value="${esc(STATE.matchesDateTo)}" style="width:140px;">
+        </label>` : ''}
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Home Priority:
+        <select id="mHomeFilter_${suffix}" class="select">
+          <option value="">All</option>
+          ${homeOpts.map(v => `<option value="${esc(v)}"${STATE.matchesHomeFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Away Priority:
+        <select id="mAwayFilter_${suffix}" class="select">
+          <option value="">All</option>
+          ${awayOpts.map(v => `<option value="${esc(v)}"${STATE.matchesAwayFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Priority:
+        <select id="mPriorityFilter_${suffix}" class="select">
+          <option value="">All priorities</option>
+          ${priorityAll.map(p => `<option value="${esc(p)}"${STATE.matchesPriorityFilter===p?' selected':''}>${esc(p)}</option>`).join('')}
+        </select>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;">
+          <input type="checkbox" id="mPriorityExclude_${suffix}"${STATE.matchesPriorityExclude?' checked':''}>
+          Exclude
+        </label>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Exclude IDs:
+        <input id="mExcludeIds_${suffix}" class="input" type="text" placeholder="id1, id2, …"
+          value="${esc(STATE.matchesExcludeIds)}" style="width:180px;">
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Outlier (Delivery Time):
+        <select id="mOutlierOp_${suffix}" class="select">
+          <option value="">— none —</option>
+          <option value="above"${STATE.matchesOutlierOp==='above'?' selected':''}>Exclude above</option>
+          <option value="below"${STATE.matchesOutlierOp==='below'?' selected':''}>Exclude below</option>
+        </select>
+        <input id="mOutlierVal_${suffix}" class="input" type="number" placeholder="hours"
+          value="${esc(STATE.matchesOutlierVal)}" style="width:80px;">
+      </label>
+      <button id="mApply_${suffix}" class="btn btn-primary">Apply</button>
+    </div>`;
+}
+
+function wireMatchesFilters(suffix, reloadFn) {
+  const g = id => document.getElementById(id + '_' + suffix);
+  const sel = (id, key) => { const el = g(id); if (el) el.addEventListener('change', e => { STATE[key] = e.target.value; reloadFn(); }); };
+  const chk = (id, key) => { const el = g(id); if (el) el.addEventListener('change', e => { STATE[key] = e.target.checked; reloadFn(); }); };
+  sel('mHomeFilter',     'matchesHomeFilter');
+  sel('mAwayFilter',     'matchesAwayFilter');
+  sel('mPriorityFilter', 'matchesPriorityFilter');
+  chk('mPriorityExclude','matchesPriorityExclude');
+  // Date pickers — immediate
+  const dd = g('mDailyDate'); if (dd) dd.addEventListener('change', e => { STATE.matchesDailyDate = e.target.value; reloadFn(); });
+  const df = g('mDateFrom'); if (df) df.addEventListener('change', e => { STATE.matchesDateFrom = e.target.value; reloadFn(); });
+  const dt = g('mDateTo');   if (dt) dt.addEventListener('change', e => { STATE.matchesDateTo   = e.target.value; reloadFn(); });
+  // Apply button for text/number inputs
+  const applyBtn = g('mApply');
+  if (applyBtn) applyBtn.addEventListener('click', () => {
+    const eid = g('mExcludeIds'); if (eid) STATE.matchesExcludeIds = eid.value.trim();
+    const oop = g('mOutlierOp');  if (oop) STATE.matchesOutlierOp  = oop.value;
+    const ovl = g('mOutlierVal'); if (ovl) STATE.matchesOutlierVal = ovl.value.trim();
+    reloadFn();
+  });
+}
+
 // ============================================================
 async function loadMatchesPage() {
   const panel = document.getElementById('panel-matches');
@@ -2704,92 +2815,25 @@ async function loadMatchesPage() {
   priorityLabels.forEach(p => { priorityCounts[p] = 0; });
   rows.forEach(r => { priorityCounts[r.priority] = (priorityCounts[r.priority] || 0) + 1; });
 
+  const filterHTML = await buildMatchesFilterHTML('main', { homeOpts, awayOpts });
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
-        <h3 class="panel-title">Matches filters</h3>
+        <h3 class="panel-title">Matches</h3>
         <div class="panel-actions">
           <span class="chip">${rows.length} matches</span>
           <button class="btn-icon" data-export="tblMatches">Export CSV</button>
         </div>
       </div>
-      <div class="filters" style="margin-bottom:4px;flex-wrap:wrap;row-gap:8px;">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Home Priority:
-          <select id="mHomeFilter" class="select">
-            <option value="">All</option>
-            ${homeOpts.map(v => `<option value="${esc(v)}"${STATE.matchesHomeFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
-          </select>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Away Priority:
-          <select id="mAwayFilter" class="select">
-            <option value="">All</option>
-            ${awayOpts.map(v => `<option value="${esc(v)}"${STATE.matchesAwayFilter===v?' selected':''}>${esc(v)}</option>`).join('')}
-          </select>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Priority:
-          <select id="mPriorityFilter" class="select">
-            <option value="">All priorities</option>
-            ${priorityLabels.map(p => `<option value="${esc(p)}"${STATE.matchesPriorityFilter===p?' selected':''}>${esc(p)}</option>`).join('')}
-          </select>
-          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;">
-            <input type="checkbox" id="mPriorityExclude"${STATE.matchesPriorityExclude?' checked':''}>
-            Exclude
-          </label>
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Exclude IDs:
-          <input id="mExcludeIds" class="input" type="text" placeholder="id1, id2, …"
-            value="${esc(STATE.matchesExcludeIds)}" style="width:200px;">
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;">Outlier (delivery_time):
-          <select id="mOutlierOp" class="select">
-            <option value="">— none —</option>
-            <option value="above"${STATE.matchesOutlierOp==='above'?' selected':''}>above</option>
-            <option value="below"${STATE.matchesOutlierOp==='below'?' selected':''}>below</option>
-          </select>
-          <input id="mOutlierVal" class="input" type="number" placeholder="hours"
-            value="${esc(STATE.matchesOutlierVal)}" style="width:80px;">
-        </label>
-        <button id="mApplyFilters" class="btn btn-primary">Apply</button>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><h3 class="panel-title">Priority distribution</h3></div>
-      <div class="chart-wrap short"><canvas id="chartMatchesPriority"></canvas></div>
-    </div>
-    <div class="panel">
-      <div class="panel-header">
-        <h3 class="panel-title">All matches</h3>
-        <div class="panel-actions">
-          <span class="chip">${rows.length} rows</span>
-          <button class="btn-icon" data-export="tblMatches">Export CSV</button>
-        </div>
-      </div>
+      ${filterHTML}
+      <div class="panel-header" style="margin-top:8px;"><h3 class="panel-title">Priority distribution</h3></div>
+      <div class="chart-wrap short" style="margin-bottom:12px;"><canvas id="chartMatchesPriority"></canvas></div>
       <div class="table-wrap"><table id="tblMatches"></table></div>
     </div>
   `;
 
-  // Wire filter controls — immediate-change selects
-  document.getElementById('mHomeFilter').addEventListener('change', e => {
-    STATE.matchesHomeFilter = e.target.value; loadMatchesPage();
-  });
-  document.getElementById('mAwayFilter').addEventListener('change', e => {
-    STATE.matchesAwayFilter = e.target.value; loadMatchesPage();
-  });
-  document.getElementById('mPriorityFilter').addEventListener('change', e => {
-    STATE.matchesPriorityFilter = e.target.value; loadMatchesPage();
-  });
-  document.getElementById('mPriorityExclude').addEventListener('change', e => {
-    STATE.matchesPriorityExclude = e.target.checked; loadMatchesPage();
-  });
-  // Apply button reads text/number inputs
-  document.getElementById('mApplyFilters').addEventListener('click', () => {
-    STATE.matchesExcludeIds  = document.getElementById('mExcludeIds').value.trim();
-    STATE.matchesOutlierOp   = document.getElementById('mOutlierOp').value;
-    STATE.matchesOutlierVal  = document.getElementById('mOutlierVal').value.trim();
-    loadMatchesPage();
-  });
+  wireMatchesFilters('main', loadMatchesPage);
 
-  // Priority bar chart (color per bar)
   destroyChart('chartMatchesPriority');
   const pCtx = document.getElementById('chartMatchesPriority');
   if (pCtx) {
@@ -2797,19 +2841,17 @@ async function loadMatchesPage() {
       type: 'bar',
       data: {
         labels: priorityLabels,
-        datasets: [{
-          label: 'Matches',
+        datasets: [{ label: 'Matches',
           data: priorityLabels.map(p => priorityCounts[p] || 0),
           backgroundColor: priorityLabels.map(p => MATCHES_PRIORITY_COLORS[p] || '#e2e8f0'),
-          borderRadius: 4, maxBarThickness: 80,
-        }],
+          borderRadius: 4 }],
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
         plugins: { legend: { display: false }, tooltip: { intersect: false } },
         scales: {
-          x: { grid: { display: false } },
-          y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+          x: { grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+          y: { grid: { display: false } },
         },
       },
     });
@@ -2821,8 +2863,15 @@ async function loadMatchesPage() {
 // ============================================================
 // Matches — grouped performance panels (daily / weekly / monthly)
 // ============================================================
+const SLA_COLORS = ['#3b82f6','#22c55e','#f97316','#a855f7','#ef4444','#14b8a6','#f59e0b','#64748b'];
+
 function buildMatchesGrouped(rows, keyFn, keyLabel) {
-  const priorityLabels = [...PRIORITY_ORDER, 'Other'];
+  const priorityAll = [...PRIORITY_ORDER, 'Other'];
+
+  // Collect distinct SLA values across filtered rows
+  const slaSet = new Set(rows.map(r => r.game_sla || '—').filter(Boolean));
+  const slaLabels = [...slaSet].sort();
+
   const groupMap = {};
   rows.forEach(r => {
     const key = keyFn(r.first_collection_complete);
@@ -2832,121 +2881,203 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
   });
 
   const sorted = Object.keys(groupMap).sort();
+
   const tableRows = sorted.map(k => {
     const g = groupMap[k];
     const total = g.rows.length;
-    const dtVals = g.rows
-      .map(r => parseFloat(r.delivery_time))
-      .filter(v => !isNaN(v) && isFinite(v));
+    const dtVals = g.rows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v) && isFinite(v));
     const avgDt = dtVals.length
       ? Math.round((dtVals.reduce((a, b) => a + b, 0) / dtVals.length) * 10) / 10
       : null;
-    const byCat = {};
-    priorityLabels.forEach(p => {
-      byCat[p] = g.rows.filter(r => r.priority === p).length;
-    });
-    return { [keyLabel]: k, total, avg_delivery: avgDt, ...byCat };
+    const bySla = {};
+    slaLabels.forEach(s => { bySla[s] = g.rows.filter(r => (r.game_sla || '—') === s).length; });
+    return { [keyLabel]: k, total, avg_delivery: avgDt, ...bySla };
   });
 
+  // For month keys (YYYY-MM) show friendly label; weeks/days show as-is
+  const isMonth = sorted.length && /^\d{4}-\d{2}$/.test(sorted[0]);
+  const keyRender = isMonth ? (r => fmtMonthLabel(r[keyLabel])) : null;
   const cols = [
-    { key: keyLabel, label: keyLabel },
-    { key: 'total',        label: 'Total',            num: true },
-    { key: 'avg_delivery', label: 'Avg Delivery (h)', num: true },
-    ...priorityLabels.map(p => ({ key: p, label: p, num: true })),
+    { key: keyLabel, label: keyLabel, raw: !!keyRender, render: keyRender },
+    { key: 'total',       label: 'Total',            num: true },
+    { key: 'avg_delivery',label: 'Avg Delivery (h)', num: true },
+    ...slaLabels.map(s => ({ key: s, label: `SLA: ${s}`, num: true })),
   ];
 
-  // Chart datasets — one per priority
-  const chartLabels = sorted;
-  const datasets = priorityLabels.map(p => ({
-    label: p,
-    data: sorted.map(k => groupMap[k].rows.filter(r => r.priority === p).length),
-    backgroundColor: MATCHES_PRIORITY_COLORS[p] || '#e2e8f0',
+  // Main chart: stacked bar grouped by game_sla
+  const slaDatasets = slaLabels.map((s, i) => ({
+    label: s,
+    data: sorted.map(k => groupMap[k].rows.filter(r => (r.game_sla || '—') === s).length),
+    backgroundColor: SLA_COLORS[i % SLA_COLORS.length],
     borderRadius: 2,
   }));
 
-  return { tableRows, cols, chartLabels, datasets };
+  // Per-priority individual chart data: { priority → [{label, count}] }
+  const perPriorityData = {};
+  priorityAll.forEach(p => {
+    perPriorityData[p] = sorted.map(k => ({
+      label: k,
+      count: groupMap[k].rows.filter(r => r.priority === p).length,
+    }));
+  });
+
+  // All-priority horizontal bar totals
+  const priorityTotals = priorityAll.map(p => rows.filter(r => r.priority === p).length);
+
+  // For monthly keys (YYYY-MM) convert chart labels to friendly names
+  const displayLabels = isMonth ? sorted.map(fmtMonthLabel) : sorted;
+  return { tableRows, cols, chartLabels: displayLabels, sortedKeys: sorted, slaDatasets, perPriorityData, priorityAll, priorityTotals };
+}
+
+function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, data, filterHTML = '') {
+  const { chartLabels, slaDatasets, perPriorityData, priorityAll, priorityTotals } = data;
+  const pCharts = priorityAll.map(p =>
+    `<div style="flex:1;min-width:200px;">
+       <div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--text-2)">${p}</div>
+       <div class="chart-wrap short"><canvas id="chartMP_${p.replace(/\s/g,'_')}_${exportId}"></canvas></div>
+     </div>`
+  ).join('');
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">${title}</h3>
+        <div class="panel-actions">
+          <span class="chip">${tableRows.length} rows</span>
+          <button class="btn-icon" data-export="${exportId}">Export CSV</button>
+        </div>
+      </div>
+      ${filterHTML}
+      <div class="chart-wrap" style="margin-bottom:12px;"><canvas id="chartMSla_${exportId}"></canvas></div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;">${pCharts}</div>
+      <div class="panel-sub" style="font-weight:600;margin-bottom:4px;">Priority distribution</div>
+      <div class="chart-wrap short" style="margin-bottom:12px;"><canvas id="chartMPrAll_${exportId}"></canvas></div>
+      <div class="table-wrap"><table id="${exportId}"></table></div>
+    </div>
+  `;
+
+  // Main SLA stacked bar
+  stackedBar(`chartMSla_${exportId}`, chartLabels, slaDatasets);
+
+  // Per-priority individual bar charts
+  priorityAll.forEach(p => {
+    const cid = `chartMP_${p.replace(/\s/g,'_')}_${exportId}`;
+    destroyChart(cid);
+    const ctx = document.getElementById(cid);
+    if (!ctx) return;
+    CHARTS[cid] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: perPriorityData[p].map(x => x.label),
+        datasets: [{ label: p, data: perPriorityData[p].map(x => x.count),
+          backgroundColor: MATCHES_PRIORITY_COLORS[p] || '#e2e8f0', borderRadius: 3 }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { autoSkip: true, maxRotation: 45 } },
+          y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+  });
+
+  // Horizontal bar all-priority
+  const hid = `chartMPrAll_${exportId}`;
+  destroyChart(hid);
+  const hCtx = document.getElementById(hid);
+  if (hCtx) {
+    CHARTS[hid] = new Chart(hCtx, {
+      type: 'bar',
+      data: {
+        labels: priorityAll,
+        datasets: [{ label: 'Matches', data: priorityTotals,
+          backgroundColor: priorityAll.map(p => MATCHES_PRIORITY_COLORS[p] || '#e2e8f0'),
+          borderRadius: 3 }],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: css('--border') }, beginAtZero: true, ticks: { precision: 0 } },
+          y: { grid: { display: false } },
+        },
+      },
+    });
+  }
+
+  renderTable(exportId, cols, tableRows);
 }
 
 async function loadMatchesDaily() {
   const panel = document.getElementById('panel-matches-daily');
   if (!panel) return;
-  const rows = await loadMatchesData();
 
-  const keyFn = dateStr => (dateStr || '').slice(0, 10);
-  const { tableRows, cols, chartLabels, datasets } =
-    buildMatchesGrouped(rows, keyFn, 'Date');
+  const [homeRes, awayRes] = await Promise.all([
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
+  ]);
+  const homeOpts = homeRes.rows.map(r => r.v);
+  const awayOpts = awayRes.rows.map(r => r.v);
 
+  // Get all rows (ignoring date range — daily uses its own date picker)
+  const savedFrom = STATE.matchesDateFrom; const savedTo = STATE.matchesDateTo;
+  STATE.matchesDateFrom = ''; STATE.matchesDateTo = '';
+  const allRows = await loadMatchesData();
+  STATE.matchesDateFrom = savedFrom; STATE.matchesDateTo = savedTo;
+
+  // Default date = latest date in data
+  const allDates = [...new Set(allRows.map(r => (r.first_collection_complete || '').slice(0,10)).filter(Boolean))].sort();
+  if (!STATE.matchesDailyDate && allDates.length) STATE.matchesDailyDate = allDates[allDates.length - 1];
+
+  const dayRows = allRows.filter(r => (r.first_collection_complete || '').slice(0,10) === STATE.matchesDailyDate);
+
+  const filterHTML = await buildMatchesFilterHTML('daily', { homeOpts, awayOpts, showDailyDate: true });
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
-        <h3 class="panel-title">Daily performance</h3>
+        <h3 class="panel-title">Daily Performance</h3>
         <div class="panel-actions">
-          <span class="chip">${tableRows.length} days</span>
+          <span class="chip">${dayRows.length} matches</span>
           <button class="btn-icon" data-export="tblMatchesDaily">Export CSV</button>
         </div>
       </div>
-      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
-      <div class="chart-wrap"><canvas id="chartMatchesDaily"></canvas></div>
-      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesDaily"></table></div>
+      ${filterHTML}
+      <div class="table-wrap"><table id="tblMatchesDaily"></table></div>
     </div>
   `;
 
-  stackedBar('chartMatchesDaily', chartLabels, datasets);
-  renderTable('tblMatchesDaily', cols, tableRows);
+  wireMatchesFilters('daily', loadMatchesDaily);
+  renderTable('tblMatchesDaily', MATCHES_DISPLAY_COLS, dayRows);
 }
 
 async function loadMatchesWeekly() {
   const panel = document.getElementById('panel-matches-weekly');
   if (!panel) return;
+  const [homeRes, awayRes] = await Promise.all([
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
+  ]);
   const rows = await loadMatchesData();
-
-  const { tableRows, cols, chartLabels, datasets } =
-    buildMatchesGrouped(rows, getWeekLabel, 'Week');
-
-  panel.innerHTML = `
-    <div class="panel">
-      <div class="panel-header">
-        <h3 class="panel-title">Weekly performance</h3>
-        <div class="panel-actions">
-          <span class="chip">${tableRows.length} weeks</span>
-          <button class="btn-icon" data-export="tblMatchesWeekly">Export CSV</button>
-        </div>
-      </div>
-      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
-      <div class="chart-wrap"><canvas id="chartMatchesWeekly"></canvas></div>
-      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesWeekly"></table></div>
-    </div>
-  `;
-
-  stackedBar('chartMatchesWeekly', chartLabels, datasets);
-  renderTable('tblMatchesWeekly', cols, tableRows);
+  const result = buildMatchesGrouped(rows, getWeekLabel, 'Week');
+  const filterHTML = await buildMatchesFilterHTML('weekly', { homeOpts: homeRes.rows.map(r=>r.v), awayOpts: awayRes.rows.map(r=>r.v), showDateRange: true });
+  renderMatchesPerformancePanel(panel, 'Weekly Performance', 'tblMatchesWeekly', result.tableRows, result.cols, result, filterHTML);
+  wireMatchesFilters('weekly', loadMatchesWeekly);
 }
 
 async function loadMatchesMonthly() {
   const panel = document.getElementById('panel-matches-monthly');
   if (!panel) return;
+  const [homeRes, awayRes] = await Promise.all([
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
+  ]);
   const rows = await loadMatchesData();
-
-  const { tableRows, cols, chartLabels, datasets } =
-    buildMatchesGrouped(rows, getMonthLabel, 'Month');
-
-  panel.innerHTML = `
-    <div class="panel">
-      <div class="panel-header">
-        <h3 class="panel-title">Monthly performance</h3>
-        <div class="panel-actions">
-          <span class="chip">${tableRows.length} months</span>
-          <button class="btn-icon" data-export="tblMatchesMonthly">Export CSV</button>
-        </div>
-      </div>
-      <div class="panel-sub" style="margin-bottom:8px;">Filters set in the <strong>Matches</strong> tab apply here.</div>
-      <div class="chart-wrap"><canvas id="chartMatchesMonthly"></canvas></div>
-      <div class="table-wrap" style="margin-top:12px;"><table id="tblMatchesMonthly"></table></div>
-    </div>
-  `;
-
-  stackedBar('chartMatchesMonthly', chartLabels, datasets);
-  renderTable('tblMatchesMonthly', cols, tableRows);
+  const result = buildMatchesGrouped(rows, getMonthLabel, 'Month');
+  const filterHTML = await buildMatchesFilterHTML('monthly', { homeOpts: homeRes.rows.map(r=>r.v), awayOpts: awayRes.rows.map(r=>r.v), showDateRange: true });
+  renderMatchesPerformancePanel(panel, 'Monthly Performance', 'tblMatchesMonthly', result.tableRows, result.cols, result, filterHTML);
+  wireMatchesFilters('monthly', loadMatchesMonthly);
 }
 
 // ============================================================
