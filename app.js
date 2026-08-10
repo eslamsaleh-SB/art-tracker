@@ -435,6 +435,8 @@ const STATE = {
   matchesDateTo: '',
   matchesBarMonth: '',    // bar chart month filter (YYYY-MM, '' = current month)
   matchesBarWeek: '',     // bar chart week filter (YYYY-MM-DD Sunday, '' = all weeks in selected month)
+  detailsQdtMin: '',      // Deliver Time Details — min delivery_time filter
+  detailsQdtMax: '',      // Deliver Time Details — max delivery_time filter
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -615,6 +617,7 @@ function setView(name) {
     hours: 'Reviewer hours', import: 'Import CSV',
     matches: 'Quality Delivery Time',
     matches_weekly: 'Quality Delivery Time — Weekly', matches_monthly: 'Quality Delivery Time — Monthly',
+    deliver_details: 'Deliver Time Details',
   }[name] || name;
   refresh();
 }
@@ -755,6 +758,7 @@ async function refresh(opts) {
     if (STATE.view === 'matches')         await loadMatchesPage();
     if (STATE.view === 'matches_weekly')  await loadMatchesWeekly();
     if (STATE.view === 'matches_monthly') await loadMatchesMonthly();
+    if (STATE.view === 'deliver_details') await loadDeliverTimeDetails();
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {

@@ -249,6 +249,9 @@
   </div>
   <nav class="nav">
     <button class="nav-item active" data-view="matches"><span class="ico">⚽</span><span>Quality Delivery Time</span></button>
+    <button class="nav-item" data-view="deliver_details" style="padding-left:28px;font-size:12px;"><span class="ico">☰</span><span>Deliver Time Details</span></button>
+    <button class="nav-item" data-view="matches_weekly" style="padding-left:28px;font-size:12px;"><span class="ico">◉</span><span>Weekly</span></button>
+    <button class="nav-item" data-view="matches_monthly" style="padding-left:28px;font-size:12px;"><span class="ico">◉</span><span>Monthly</span></button>
     <button class="nav-item" data-view="overview"><span class="ico">◫</span><span>Overview</span></button>
     <button class="nav-item" data-view="tasks"><span class="ico">▤</span><span>By Task</span></button>
     <button class="nav-item" data-view="reviewers"><span class="ico">◉</span><span>By Reviewer</span></button>
@@ -261,8 +264,6 @@
     <button class="nav-item" data-view="bc"><span class="ico">◇</span><span>B - C Review</span></button>
     <button class="nav-item" data-view="bc_nologs" style="padding-left:28px;font-size:12px;"><span class="ico">✖</span><span>No Logs</span></button>
     <button class="nav-item" data-view="hours"><span class="ico">⏱</span><span>Hours</span></button>
-    <button class="nav-item" data-view="matches_weekly" style="padding-left:28px;font-size:12px;"><span class="ico">◉</span><span>Weekly</span></button>
-    <button class="nav-item" data-view="matches_monthly" style="padding-left:28px;font-size:12px;"><span class="ico">◉</span><span>Monthly</span></button>
     <button class="nav-item" data-view="import"><span class="ico">↥</span><span>Import CSV</span></button>
   </nav>
   <div class="nav-footer">
@@ -674,6 +675,11 @@
   <!-- MATCHES MONTHLY -->
   <section id="view-matches_monthly" class="view hidden">
     <div id="panel-matches-monthly"></div>
+  </section>
+
+  <!-- DELIVER TIME DETAILS -->
+  <section id="view-deliver_details" class="view hidden">
+    <div id="panel-deliver-details"></div>
   </section>
 
 
