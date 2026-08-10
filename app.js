@@ -392,7 +392,7 @@ function ruleActualExpr(aliasA, aliasDL) {
 // State
 // ============================================================
 const STATE = {
-  view: 'matches',
+  view: 'deliver_details',
   range: '12m',
   customStart: '',
   customEnd: '',
@@ -608,7 +608,7 @@ function setView(name) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + name));
   document.getElementById('pageTitle').textContent = {
-    overview: 'Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer',
+    overview: 'Reviewer ART Overview', tasks: 'Analysis by task', reviewers: 'Analysis by reviewer',
     rows: 'Assignments',
     players: 'Players', bc: 'B - C Review',
     players_nologs: 'Players — No Logs', bc_nologs: 'B - C — No Logs',
@@ -3327,6 +3327,45 @@ async function loadDeliverTimeDetails() {
     if (!isNaN(mx)) rawRows = rawRows.filter(r => parseFloat(r.delivery_time) <= mx);
   }
 
+  // Build per-SLA card data
+  const slaLabels = result.slaLabels || [];
+  const slaCards = slaLabels.map(s => {
+    const color = getSlaColor(s);
+    const slaRows = rows.filter(r => (r.game_sla || '—') === s);
+    const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v) && isFinite(v));
+    const avg = vals.length ? Math.round((vals.reduce((a,b) => a+b,0) / vals.length) * 10) / 10 : null;
+    // Last two months for MoM trend
+    const byMonth = {};
+    slaRows.forEach(r => {
+      const m = getMonthLabel(r.first_collection_complete);
+      if (m && m !== 'Unknown') { if (!byMonth[m]) byMonth[m] = []; byMonth[m].push(parseFloat(r.delivery_time)); }
+    });
+    const months = Object.keys(byMonth).sort();
+    let trendHtml = '';
+    if (months.length >= 2) {
+      const lastVals = byMonth[months[months.length-1]].filter(v => !isNaN(v));
+      const prevVals = byMonth[months[months.length-2]].filter(v => !isNaN(v));
+      if (lastVals.length && prevVals.length) {
+        const lastAvg = lastVals.reduce((a,b)=>a+b,0) / lastVals.length;
+        const prevAvg = prevVals.reduce((a,b)=>a+b,0) / prevVals.length;
+        const diff = lastAvg - prevAvg;
+        const absDiff = Math.abs(diff).toFixed(1);
+        const arrow = diff > 0 ? '↑' : '↓';
+        const trendColor = diff > 0 ? '#ef4444' : '#22c55e';
+        trendHtml = `<div style="font-size:11px;color:${trendColor};font-weight:600;margin-top:4px;">${arrow} ${absDiff}H vs prev month</div>`;
+      }
+    }
+    return `
+      <div style="background:var(--card);border:1px solid ${color}44;border-radius:8px;padding:14px 16px;min-width:140px;flex:1;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span style="background:${color}22;color:${color};border:1px solid ${color}55;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:700;">SLA ${s}</span>
+        </div>
+        <div style="font-size:22px;font-weight:700;color:var(--text);">${avg != null ? avg + 'H' : '—'}</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Avg delivery · ${slaRows.length} matches</div>
+        ${trendHtml}
+      </div>`;
+  });
+
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
@@ -3337,11 +3376,11 @@ async function loadDeliverTimeDetails() {
         </div>
       </div>
       ${filterHTML}
+      <div class="panel-header" style="margin-top:8px;"><h3 class="panel-title">SLA Summary</h3></div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px;">${slaCards.join('')}</div>
       <div class="panel-header" style="margin-top:8px;">
         <h3 class="panel-title">Summary by Month</h3>
-        <div class="panel-actions">
-          <button class="btn-icon" data-export="tblDetailsSummary">Export CSV</button>
-        </div>
+        <div class="panel-actions"><button class="btn-icon" data-export="tblDetailsSummary">Export CSV</button></div>
       </div>
       <div class="table-wrap" style="margin-bottom:24px;"><table id="tblDetailsSummary"></table></div>
       <div class="panel-header" style="margin-top:8px;">
@@ -3353,7 +3392,7 @@ async function loadDeliverTimeDetails() {
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0 12px;">
         <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
-          Quality Delivery Time ≥
+          Delivery Time ≥
           <input id="qdtMinInput" type="number" min="0" step="0.1" value="${STATE.detailsQdtMin}"
             placeholder="Min (H)"
             style="width:80px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--text);font-size:12px;">
