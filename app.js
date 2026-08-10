@@ -2943,34 +2943,38 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
         ? Math.round((artVals.reduce((a, b) => a + b, 0) / artVals.length) * 10) / 10
         : null;
     });
-    const slaCount = {};
-    slaLabels.forEach(s => { slaCount['sla_cnt_' + s] = bySla[s] || 0; });
-    return { [keyLabel]: k, total, avg_delivery: avgDt, ...slaCount };
+    return { [keyLabel]: k, total, avg_delivery: avgDt, ...artBySla };
   });
 
   // For month keys (YYYY-MM) show friendly label; weeks/days show as-is
   const isMonth = sorted.length && /^\d{4}-\d{2}$/.test(sorted[0]);
   const keyRender = isMonth ? (r => fmtMonthLabel(r[keyLabel])) : null;
   const cols = [
-    { key: keyLabel,      label: keyLabel, raw: !!keyRender, render: keyRender },
-    { key: 'total',       label: 'Total Matches', num: true },
-    { key: 'avg_delivery',label: 'Avg Delivery Time (H)', num: true },
-    ...slaLabels.map(s => ({ key: 'sla_cnt_' + s, label: 'SLA: ' + s, num: true })),
+    { key: keyLabel,       label: keyLabel, raw: !!keyRender, render: keyRender },
+    { key: 'total',        label: 'Total Matches', num: true },
+    { key: 'avg_delivery', label: 'Avg Delivery (H)', num: true },
+    ...slaLabels.map(s => ({ key: 'art_' + s, label: 'ART — SLA: ' + s, num: true })),
   ];
 
-  // Stacked bar chart datasets: avg delivery_time per SLA per period
-  const slaDatasets = slaLabels.map(s => ({
-    label: 'SLA: ' + s,
-    data: sorted.map(k => {
-      const g = groupMap[k];
-      const slaRows = g.rows.filter(r => (r.game_sla || '—') === s);
-      if (!slaRows.length) return 0;
-      const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v));
-      return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : 0;
-    }),
-    backgroundColor: getSlaColor(s),
-    borderRadius: 2,
-  }));
+  // Line chart datasets: one line per SLA, y = avg delivery_time
+  const slaDatasets = slaLabels.map(s => {
+    const color = getSlaColor(s);
+    return {
+      label: 'SLA: ' + s,
+      data: sorted.map(k => {
+        const slaRows = groupMap[k].rows.filter(r => (r.game_sla || '—') === s);
+        if (!slaRows.length) return null;
+        const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v));
+        return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : null;
+      }),
+      borderColor: color,
+      backgroundColor: color + '22',
+      pointBackgroundColor: color,
+      tension: 0.3,
+      pointRadius: 4,
+      fill: false,
+    };
+  });
 
   // For monthly keys (YYYY-MM) convert chart labels to friendly names
   const displayLabels = isMonth ? sorted.map(fmtMonthLabel) : sorted;
@@ -3028,7 +3032,7 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
     }
   }
   const barDatasets = slaDatasets.map(ds => ({ ...ds, data: barKeys.map((_, ii) => ds.data[sorted.indexOf(barKeys[ii])]) }));
-  const barHeight = Math.max(200, barKeys.length * 32 + 80);
+  const barHeight = 320;
 
   const monthOpts = allMonths.map(m =>
     `<option value="${m}"${STATE.matchesBarMonth === m ? ' selected' : ''}>${fmtMonthLabel(m)}</option>`
@@ -3095,24 +3099,36 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
   // 1. Summary table
   renderTable(exportId, cols, tableRows);
 
-  // 2. Horizontal stacked bar — filtered to selected month/week
+  // 2. Multi-line chart — one line per SLA, filtered to selected month/week
   destroyChart(`chartMSla_${exportId}`);
   const ctx = document.getElementById(`chartMSla_${exportId}`);
   if (ctx) {
     CHARTS[`chartMSla_${exportId}`] = new Chart(ctx, {
-      type: 'bar',
+      type: 'line',
       data: { labels: barLabels, datasets: barDatasets },
+      plugins: typeof ChartDataLabels !== 'undefined' ? [ChartDataLabels] : [],
       options: {
-        indexAxis: 'y',
         responsive: true, maintainAspectRatio: false,
         plugins: {
-          legend: { position: 'top', labels: { boxWidth: 10 } },
-          tooltip: { mode: 'index' },
+          legend: { position: 'top', labels: { boxWidth: 12, usePointStyle: true } },
+          tooltip: { mode: 'index', intersect: false },
+          datalabels: typeof ChartDataLabels !== 'undefined' ? {
+            align: 'top',
+            anchor: 'end',
+            // Only show label on the LAST non-null point of each dataset
+            formatter: (value, ctx) => {
+              const ds = ctx.dataset.data;
+              const lastIdx = ds.reduce((acc, v, i) => (v != null ? i : acc), -1);
+              return ctx.dataIndex === lastIdx ? ctx.dataset.label : null;
+            },
+            font: { size: 10, weight: '600' },
+            color: ctx2 => ctx2.dataset.borderColor,
+            padding: 2,
+          } : false,
         },
         scales: {
-          x: { stacked: true, beginAtZero: true, grid: { color: css('--border') },
-               title: { display: true, text: 'Avg Delivery Time (H)' } },
-          y: { stacked: true, grid: { display: false } },
+          x: { grid: { color: css('--border') }, title: { display: true, text: 'Period' } },
+          y: { beginAtZero: true, grid: { color: css('--border') }, title: { display: true, text: 'Avg Delivery Time (H)' } },
         },
       },
     });
