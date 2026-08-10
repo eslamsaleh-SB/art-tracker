@@ -392,7 +392,7 @@ function ruleActualExpr(aliasA, aliasDL) {
 // State
 // ============================================================
 const STATE = {
-  view: 'deliver_details',
+  view: 'matches',
   range: '12m',
   customStart: '',
   customEnd: '',
@@ -435,8 +435,6 @@ const STATE = {
   matchesDateTo: '',
   matchesBarMonth: '',    // bar chart month filter (YYYY-MM, '' = current month)
   matchesBarWeek: '',     // bar chart week filter (YYYY-MM-DD Sunday, '' = all weeks in selected month)
-  detailsQdtMin: '',      // Deliver Time Details raw table — min delivery_time filter
-  detailsQdtMax: '',      // Deliver Time Details raw table — max delivery_time filter
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -617,7 +615,6 @@ function setView(name) {
     hours: 'Reviewer hours', import: 'Import CSV',
     matches: 'Quality Delivery Time',
     matches_weekly: 'Quality Delivery Time — Weekly', matches_monthly: 'Quality Delivery Time — Monthly',
-    deliver_details: 'Deliver Time Details',
   }[name] || name;
   refresh();
 }
@@ -758,7 +755,6 @@ async function refresh(opts) {
     if (STATE.view === 'matches')         await loadMatchesPage();
     if (STATE.view === 'matches_weekly')  await loadMatchesWeekly();
     if (STATE.view === 'matches_monthly') await loadMatchesMonthly();
-    if (STATE.view === 'deliver_details') await loadDeliverTimeDetails();
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {
@@ -3159,19 +3155,42 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
         plugins: {
           legend: { display: false },
           datalabels: typeof ChartDataLabels !== 'undefined' ? {
-            align: 'top',
-            anchor: 'end',
-            formatter: (value) => value != null ? value + 'H' : null,
-            font: { size: 9, weight: '600' },
-            color: color,
-            padding: 2,
+            labels: {
+              value: {
+                align: 'top',
+                anchor: 'end',
+                formatter: (value) => value != null ? value + 'H' : null,
+                font: { size: 11, weight: '700' },
+                color: color,
+                padding: { bottom: 0 },
+              },
+              change: {
+                align: 'bottom',
+                anchor: 'end',
+                formatter: (value, ctx) => {
+                  if (value == null) return null;
+                  const prev = ctx.dataset.data[ctx.dataIndex - 1];
+                  if (prev == null || prev === 0) return null;
+                  const pct = ((value - prev) / prev * 100);
+                  return (pct > 0 ? '↑ ' : '↓ ') + Math.abs(pct).toFixed(0) + '%';
+                },
+                font: { size: 10, weight: '600' },
+                color: (ctx) => {
+                  const val = ctx.dataset.data[ctx.dataIndex];
+                  const prev = ctx.dataset.data[ctx.dataIndex - 1];
+                  if (val == null || prev == null) return 'transparent';
+                  return val > prev ? '#ef4444' : '#22c55e';
+                },
+                padding: { top: 4 },
+              },
+            },
           } : false,
         },
         scales: {
           x: { grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0, font: { size: 9 } } },
           y: { grid: { color: css('--border') }, beginAtZero: true, ticks: { font: { size: 9 } } },
         },
-        layout: { padding: { right: 10, top: 16 } },
+        layout: { padding: { right: 10, top: 20, bottom: 20 } },
       },
     });
   });
