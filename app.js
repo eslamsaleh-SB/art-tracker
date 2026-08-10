@@ -433,6 +433,8 @@ const STATE = {
   matchesDailyDate: '',   // selected date for daily detail view
   matchesDateFrom: '',    // date-range filter for weekly/monthly
   matchesDateTo: '',
+  matchesBarMonth: '',    // bar chart month filter (YYYY-MM, '' = current month)
+  matchesBarWeek: '',     // bar chart week filter (YYYY-MM-DD Sunday, '' = all weeks in selected month)
 };
 
 // Format 'YYYY-MM' → 'Mar 2026'
@@ -611,7 +613,7 @@ function setView(name) {
     players_partial: 'Players — Partial Coverage',
     nologs: 'No Logs', partial: 'Partial Coverage',
     hours: 'Reviewer hours', import: 'Import CSV',
-    matches: 'Matches', matches_daily: 'Matches — Daily Performance',
+    matches: 'Matches',
     matches_weekly: 'Matches — Weekly Performance', matches_monthly: 'Matches — Monthly Performance',
   }[name] || name;
   refresh();
@@ -751,7 +753,6 @@ async function refresh(opts) {
     if (STATE.view === 'players_partial')  await loadPlayersPartial(R);
     if (STATE.view === 'hours')     await loadHours(R);
     if (STATE.view === 'matches')         await loadMatchesPage();
-    if (STATE.view === 'matches_daily')   await loadMatchesDaily();
     if (STATE.view === 'matches_weekly')  await loadMatchesWeekly();
     if (STATE.view === 'matches_monthly') await loadMatchesMonthly();
     const dt = Math.round(performance.now() - t0);
@@ -2942,17 +2943,19 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
         ? Math.round((artVals.reduce((a, b) => a + b, 0) / artVals.length) * 10) / 10
         : null;
     });
-    return { [keyLabel]: k, total, avg_delivery: avgDt, avg_review: avgRt, ...artBySla, _bySla: bySla };
+    const slaCount = {};
+    slaLabels.forEach(s => { slaCount['sla_cnt_' + s] = bySla[s] || 0; });
+    return { [keyLabel]: k, total, avg_delivery: avgDt, ...slaCount };
   });
 
   // For month keys (YYYY-MM) show friendly label; weeks/days show as-is
   const isMonth = sorted.length && /^\d{4}-\d{2}$/.test(sorted[0]);
   const keyRender = isMonth ? (r => fmtMonthLabel(r[keyLabel])) : null;
   const cols = [
-    { key: keyLabel, label: keyLabel, raw: !!keyRender, render: keyRender },
-    { key: 'total',       label: 'Total Matches',        num: true },
-    { key: 'avg_review',  label: 'Avg Review Time (H)',  num: true },
-    ...slaLabels.map(s => ({ key: 'art_' + s, label: 'ART — SLA: ' + s, num: true })),
+    { key: keyLabel,      label: keyLabel, raw: !!keyRender, render: keyRender },
+    { key: 'total',       label: 'Total Matches', num: true },
+    { key: 'avg_delivery',label: 'Avg Delivery Time (H)', num: true },
+    ...slaLabels.map(s => ({ key: 'sla_cnt_' + s, label: 'SLA: ' + s, num: true })),
   ];
 
   // Stacked bar chart datasets: avg delivery_time per SLA per period
@@ -2992,6 +2995,49 @@ const RAW_MATCH_COLS = [
 function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, data, filterHTML = '') {
   const { chartLabels, slaDatasets, slaLabels = [], groupMap = {}, sorted = [], allRows = [] } = data;
 
+  // Build bar chart filter options — months and weeks from the data
+  const allMonths = [...new Set(sorted.map(k => k.slice(0, 7)).filter(m => /^\d{4}-\d{2}$/.test(m)))].sort();
+  // Default bar month = current month if present, else latest
+  const nowYM = new Date().toISOString().slice(0, 7);
+  if (!STATE.matchesBarMonth) STATE.matchesBarMonth = allMonths.includes(nowYM) ? nowYM : (allMonths[allMonths.length - 1] || '');
+
+  // Weeks within selected month (for weekly view, sorted keys are YYYY-MM-DD)
+  const isWeeklyView = sorted.length > 0 && /^\d{4}-\d{2}-\d{2}$/.test(sorted[0]);
+  const weeksInMonth = isWeeklyView
+    ? sorted.filter(k => k.slice(0, 7) === STATE.matchesBarMonth)
+    : [];
+
+  // Filter bar chart data to selected month/week
+  let barKeys = sorted;
+  let barLabels = chartLabels;
+  if (STATE.matchesBarMonth) {
+    if (isWeeklyView) {
+      // Weekly: filter to weeks in selected month
+      const weekFilter = STATE.matchesBarWeek || null;
+      const indices = sorted.reduce((acc, k, i) => {
+        if (k.slice(0, 7) === STATE.matchesBarMonth && (!weekFilter || k === weekFilter)) acc.push(i);
+        return acc;
+      }, []);
+      barKeys = indices.map(i => sorted[i]);
+      barLabels = indices.map(i => chartLabels[i]);
+    } else {
+      // Monthly: filter to selected month only
+      const indices = sorted.reduce((acc, k, i) => { if (k === STATE.matchesBarMonth) acc.push(i); return acc; }, []);
+      barKeys = indices.map(i => sorted[i]);
+      barLabels = indices.map(i => chartLabels[i]);
+    }
+  }
+  const barDatasets = slaDatasets.map(ds => ({ ...ds, data: barKeys.map((_, ii) => ds.data[sorted.indexOf(barKeys[ii])]) }));
+  const barHeight = Math.max(200, barKeys.length * 32 + 80);
+
+  const monthOpts = allMonths.map(m =>
+    `<option value="${m}"${STATE.matchesBarMonth === m ? ' selected' : ''}>${fmtMonthLabel(m)}</option>`
+  ).join('');
+  const weekOpts = isWeeklyView
+    ? `<option value="">All weeks in month</option>` +
+      weeksInMonth.map(w => `<option value="${w}"${STATE.matchesBarWeek === w ? ' selected' : ''}>${w}</option>`).join('')
+    : '';
+
   panel.innerHTML = `
     <div class="panel">
       <div class="panel-header">
@@ -3003,9 +3049,22 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
       </div>
       ${filterHTML}
       <div class="table-wrap" style="margin-bottom:16px;"><table id="${exportId}"></table></div>
-      <div class="chart-wrap" style="margin-bottom:16px;height:400px;"><canvas id="chartMSla_${exportId}"></canvas></div>
+      <div class="panel-header" style="margin-bottom:8px;">
+        <h3 class="panel-title">Avg Delivery Time by SLA</h3>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px;">Month:
+            <select id="barMonthSel_${exportId}" class="select">
+              <option value="">All months</option>${monthOpts}
+            </select>
+          </label>
+          ${isWeeklyView ? `<label style="font-size:12px;display:flex;align-items:center;gap:6px;">Week:
+            <select id="barWeekSel_${exportId}" class="select">${weekOpts}</select>
+          </label>` : ''}
+        </div>
+      </div>
+      <div style="margin-bottom:16px;height:${barHeight}px;"><canvas id="chartMSla_${exportId}"></canvas></div>
       <div class="panel-header"><h3 class="panel-title">SLA Performance Trends</h3></div>
-      <div id="slatrends_${exportId}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:16px;"></div>
+      <div id="slatrends_${exportId}" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px;"></div>
       <div class="panel-header">
         <h3 class="panel-title">Raw Match Data</h3>
         <div class="panel-actions">
@@ -3017,16 +3076,32 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
     </div>
   `;
 
+  // Wire bar chart month/week selectors
+  const bms = document.getElementById('barMonthSel_' + exportId);
+  if (bms) bms.addEventListener('change', e => {
+    STATE.matchesBarMonth = e.target.value;
+    STATE.matchesBarWeek = '';
+    // Re-render just this panel — call parent load fn stored on element
+    const reloadEvt = new CustomEvent('reloadPerf_' + exportId);
+    document.dispatchEvent(reloadEvt);
+  });
+  const bws = document.getElementById('barWeekSel_' + exportId);
+  if (bws) bws.addEventListener('change', e => {
+    STATE.matchesBarWeek = e.target.value;
+    const reloadEvt = new CustomEvent('reloadPerf_' + exportId);
+    document.dispatchEvent(reloadEvt);
+  });
+
   // 1. Summary table
   renderTable(exportId, cols, tableRows);
 
-  // 2. Horizontal stacked bar — avg delivery time per SLA per period
+  // 2. Horizontal stacked bar — filtered to selected month/week
   destroyChart(`chartMSla_${exportId}`);
   const ctx = document.getElementById(`chartMSla_${exportId}`);
   if (ctx) {
     CHARTS[`chartMSla_${exportId}`] = new Chart(ctx, {
       type: 'bar',
-      data: { labels: chartLabels, datasets: slaDatasets },
+      data: { labels: barLabels, datasets: barDatasets },
       options: {
         indexAxis: 'y',
         responsive: true, maintainAspectRatio: false,
@@ -3035,14 +3110,15 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
           tooltip: { mode: 'index' },
         },
         scales: {
-          x: { stacked: true, beginAtZero: true, grid: { color: css('--border') }, title: { display: true, text: 'Avg Delivery Time (H)' } },
+          x: { stacked: true, beginAtZero: true, grid: { color: css('--border') },
+               title: { display: true, text: 'Avg Delivery Time (H)' } },
           y: { stacked: true, grid: { display: false } },
         },
       },
     });
   }
 
-  // 3. SLA trend charts (one small line chart per SLA value)
+  // 3. SLA trend charts — 2 per row, show ALL periods (not filtered)
   slaLabels.forEach(s => {
     const color = getSlaColor(s);
     const cid = `chartMTrend_${s.replace(/[^a-z0-9]/gi, '_')}_${exportId}`;
@@ -3055,7 +3131,7 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
     if (!container) return;
     const div = document.createElement('div');
     div.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;';
-    div.innerHTML = `<div style="font-size:11px;font-weight:600;margin-bottom:6px;color:${color}">SLA: ${s}</div><div style="height:100px;"><canvas id="${cid}"></canvas></div>`;
+    div.innerHTML = `<div style="font-size:11px;font-weight:600;margin-bottom:6px;color:${color}">SLA: ${s}</div><div style="height:120px;"><canvas id="${cid}"></canvas></div>`;
     container.appendChild(div);
     destroyChart(cid);
     const tCtx = document.getElementById(cid);
@@ -3064,8 +3140,8 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
       type: 'line',
       data: {
         labels: chartLabels,
-        datasets: [{ label: `SLA ${s}`, data: perPeriodData, borderColor: color, backgroundColor: color + '33',
-          tension: 0.3, pointRadius: 2, fill: false }],
+        datasets: [{ label: `SLA ${s}`, data: perPeriodData, borderColor: color,
+          backgroundColor: color + '22', tension: 0.3, pointRadius: 2, fill: false }],
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -3148,6 +3224,8 @@ async function loadMatchesWeekly() {
   });
   renderMatchesPerformancePanel(panel, 'Weekly Performance', 'tblMatchesWeekly', result.tableRows, result.cols, result, filterHTML);
   wireMatchesFilters('weekly', loadMatchesWeekly);
+  document.removeEventListener('reloadPerf_tblMatchesWeekly', loadMatchesWeekly);
+  document.addEventListener('reloadPerf_tblMatchesWeekly', loadMatchesWeekly);
 }
 
 async function loadMatchesMonthly() {
@@ -3168,6 +3246,8 @@ async function loadMatchesMonthly() {
   });
   renderMatchesPerformancePanel(panel, 'Monthly Performance', 'tblMatchesMonthly', result.tableRows, result.cols, result, filterHTML);
   wireMatchesFilters('monthly', loadMatchesMonthly);
+  document.removeEventListener('reloadPerf_tblMatchesMonthly', loadMatchesMonthly);
+  document.addEventListener('reloadPerf_tblMatchesMonthly', loadMatchesMonthly);
 }
 
 // ============================================================
