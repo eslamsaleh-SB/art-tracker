@@ -615,6 +615,7 @@ function setView(name) {
     hours: 'Reviewer hours', import: 'Import CSV',
     matches: 'Matches',
     matches_weekly: 'Matches — Weekly Performance', matches_monthly: 'Matches — Monthly Performance',
+    deliver_details: 'Deliver Time Details',
   }[name] || name;
   refresh();
 }
@@ -755,6 +756,7 @@ async function refresh(opts) {
     if (STATE.view === 'matches')         await loadMatchesPage();
     if (STATE.view === 'matches_weekly')  await loadMatchesWeekly();
     if (STATE.view === 'matches_monthly') await loadMatchesMonthly();
+    if (STATE.view === 'deliver_details') await loadDeliverTimeDetails();
     const dt = Math.round(performance.now() - t0);
     document.getElementById('pageSub').textContent = `${label} · ${dt} ms`;
   } catch (e) {
@@ -3048,11 +3050,9 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
         <h3 class="panel-title">${title}</h3>
         <div class="panel-actions">
           <span class="chip">${tableRows.length} periods</span>
-          <button class="btn-icon" data-export="${exportId}">Export CSV</button>
         </div>
       </div>
       ${filterHTML}
-      <div class="table-wrap" style="margin-bottom:16px;"><table id="${exportId}"></table></div>
       <div class="panel-header" style="margin-bottom:8px;">
         <h3 class="panel-title">Avg Delivery Time by SLA</h3>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -3069,14 +3069,6 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
       <div style="margin-bottom:16px;height:${barHeight}px;"><canvas id="chartMSla_${exportId}"></canvas></div>
       <div class="panel-header"><h3 class="panel-title">SLA Performance Trends</h3></div>
       <div id="slatrends_${exportId}" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px;"></div>
-      <div class="panel-header">
-        <h3 class="panel-title">Raw Match Data</h3>
-        <div class="panel-actions">
-          <span class="chip" id="rawCount_${exportId}"></span>
-          <button class="btn-icon" data-export="tblRaw_${exportId}">Export CSV</button>
-        </div>
-      </div>
-      <div class="table-wrap"><table id="tblRaw_${exportId}"></table></div>
     </div>
   `;
 
@@ -3096,10 +3088,7 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
     document.dispatchEvent(reloadEvt);
   });
 
-  // 1. Summary table
-  renderTable(exportId, cols, tableRows);
-
-  // 2. Horizontal bar chart — one bar per SLA, filtered to selected month/week
+  // 1. Horizontal bar chart — one bar per SLA, filtered to selected month/week
   destroyChart(`chartMSla_${exportId}`);
   const ctx = document.getElementById(`chartMSla_${exportId}`);
   if (ctx) {
@@ -3182,10 +3171,7 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
           datalabels: typeof ChartDataLabels !== 'undefined' ? {
             align: 'top',
             anchor: 'end',
-            formatter: (value, ctx2) => {
-              const lastIdx = ctx2.dataset.data.reduce((acc, v, i) => (v != null ? i : acc), -1);
-              return ctx2.dataIndex === lastIdx && value != null ? value + 'H' : null;
-            },
+            formatter: (value) => value != null ? value + 'H' : null,
             font: { size: 9, weight: '600' },
             color: color,
             padding: 2,
@@ -3200,10 +3186,6 @@ function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, 
     });
   });
 
-  // 4. Raw match data table
-  renderTable('tblRaw_' + exportId, RAW_MATCH_COLS, allRows);
-  const rawCountEl = document.getElementById('rawCount_' + exportId);
-  if (rawCountEl) rawCountEl.textContent = allRows.length + ' matches';
 }
 
 async function loadMatchesDaily() {
@@ -3294,6 +3276,64 @@ async function loadMatchesMonthly() {
   wireMatchesFilters('monthly', loadMatchesMonthly);
   document.removeEventListener('reloadPerf_tblMatchesMonthly', loadMatchesMonthly);
   document.addEventListener('reloadPerf_tblMatchesMonthly', loadMatchesMonthly);
+}
+
+// ============================================================
+// Deliver Time Details — both tables (summary + raw)
+// ============================================================
+async function loadDeliverTimeDetails() {
+  const panel = document.getElementById('panel-deliver-details');
+  if (!panel) return;
+
+  const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY CAST(game_sla AS REAL)`),
+    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
+  ]);
+
+  const rows = await loadMatchesData();
+  const result = buildMatchesGrouped(rows, getMonthLabel, 'Month');
+
+  const filterHTML = await buildMatchesFilterHTML('details', {
+    homeOpts: homeRes.rows.map(r => r.v),
+    awayOpts: awayRes.rows.map(r => r.v),
+    slaOpts: slaRes.rows.map(r => r.v),
+    matchIds: matchIdRes.rows.map(r => r.v),
+    showDateRange: true,
+  });
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Deliver Time Details</h3>
+        <div class="panel-actions">
+          <span class="chip">${rows.length} matches</span>
+          <button class="btn-icon" data-export="tblDetailsSummary">Export Summary</button>
+        </div>
+      </div>
+      ${filterHTML}
+      <div class="panel-header" style="margin-top:8px;">
+        <h3 class="panel-title">Summary by Month</h3>
+        <div class="panel-actions">
+          <button class="btn-icon" data-export="tblDetailsSummary">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap" style="margin-bottom:24px;"><table id="tblDetailsSummary"></table></div>
+      <div class="panel-header">
+        <h3 class="panel-title">Raw Match Data</h3>
+        <div class="panel-actions">
+          <span class="chip">${rows.length} matches</span>
+          <button class="btn-icon" data-export="tblDetailsRaw">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="tblDetailsRaw"></table></div>
+    </div>
+  `;
+
+  wireMatchesFilters('details', loadDeliverTimeDetails);
+  renderTable('tblDetailsSummary', result.cols, result.tableRows);
+  renderTable('tblDetailsRaw', RAW_MATCH_COLS, result.allRows);
 }
 
 // ============================================================
