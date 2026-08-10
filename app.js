@@ -2927,35 +2927,25 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
   const tableRows = sorted.map(k => {
     const g = groupMap[k];
     const total = g.rows.length;
-    const dtVals = g.rows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v) && isFinite(v));
-    const avgDt = dtVals.length
-      ? Math.round((dtVals.reduce((a, b) => a + b, 0) / dtVals.length) * 10) / 10
-      : null;
-    const rtVals = g.rows.map(r => parseFloat(r.match_review_time_taken_hours)).filter(v => !isNaN(v) && isFinite(v));
-    const avgRt = rtVals.length
-      ? Math.round((rtVals.reduce((a, b) => a + b, 0) / rtVals.length) * 10) / 10
-      : null;
-    const bySla = {};
-    const artBySla = {};
+    // Per-SLA avg delivery_time — same calculation as the charts
+    const slaAvgs = {};
     slaLabels.forEach(s => {
       const slaRows = g.rows.filter(r => (r.game_sla || '—') === s);
-      bySla[s] = slaRows.length;
-      const artVals = slaRows.map(r => parseFloat(r.match_review_time_taken_hours)).filter(v => !isNaN(v) && isFinite(v));
-      artBySla['art_' + s] = artVals.length
-        ? Math.round((artVals.reduce((a, b) => a + b, 0) / artVals.length) * 10) / 10
+      const vals = slaRows.map(r => parseFloat(r.delivery_time)).filter(v => !isNaN(v) && isFinite(v));
+      slaAvgs['sla_' + s] = vals.length
+        ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10
         : null;
     });
-    return { [keyLabel]: k, total, avg_delivery: avgDt, ...artBySla };
+    return { [keyLabel]: k, total, ...slaAvgs };
   });
 
   // For month keys (YYYY-MM) show friendly label; weeks/days show as-is
   const isMonth = sorted.length && /^\d{4}-\d{2}$/.test(sorted[0]);
   const keyRender = isMonth ? (r => fmtMonthLabel(r[keyLabel])) : null;
   const cols = [
-    { key: keyLabel,       label: keyLabel, raw: !!keyRender, render: keyRender },
-    { key: 'total',        label: 'Total Matches', num: true },
-    { key: 'avg_delivery', label: 'Avg Delivery (H)', num: true },
-    ...slaLabels.map(s => ({ key: 'art_' + s, label: 'ART — SLA: ' + s, num: true })),
+    { key: keyLabel, label: keyLabel, raw: !!keyRender, render: keyRender },
+    { key: 'total',  label: 'Total Matches', num: true },
+    ...slaLabels.map(s => ({ key: 'sla_' + s, label: 'SLA ' + s + ' — Avg Delivery (H)', num: true })),
   ];
 
   // Line chart datasets: one line per SLA, y = avg delivery_time
@@ -2984,18 +2974,16 @@ function buildMatchesGrouped(rows, keyFn, keyLabel) {
 }
 
 const RAW_MATCH_COLS = [
-  { key: 'matchid',                        label: 'Match ID' },
-  { key: 'match_kick_off',                 label: 'Match Date' },
+  { key: 'matchid',               label: 'Match ID' },
+  { key: 'match_name',            label: 'Match Name' },
   { key: 'game_sla', label: 'SLA', raw: true, render: r => {
     const c = getSlaColor(r.game_sla || '');
     return `<span style="background:${c}22;color:${c};border:1px solid ${c}44;border-radius:4px;padding:1px 6px;font-size:11px;white-space:nowrap">SLA ${r.game_sla || '—'}</span>`;
   }},
-  { key: 'priority_sb_competition',        label: 'Assignee' },
-  { key: 'priority_sb_home',               label: 'Home Priority' },
-  { key: 'priority_sb_away',               label: 'Away Priority' },
-  { key: 'sla_breached',                   label: 'SLA Status' },
-  { key: 'delivery_time',                  label: 'Delivery Time (H)', num: true },
-  { key: 'match_review_time_taken_hours',  label: 'Review Time (H)',   num: true },
+  { key: 'priority_sb_competition', label: 'Assignee' },
+  { key: 'priority_sb_home',        label: 'Home Priority' },
+  { key: 'priority_sb_away',        label: 'Away Priority' },
+  { key: 'delivery_time',           label: 'Delivery Time (H)', num: true },
 ];
 
 function renderMatchesPerformancePanel(panel, title, exportId, tableRows, cols, data, filterHTML = '') {
