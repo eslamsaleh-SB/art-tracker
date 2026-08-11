@@ -6,5 +6,8 @@
   "assets": {
     "directory": ".",
     "binding": "ASSETS"
+  },
+  "vars": {
+    "SUPABASE_URL": "https://dwkmbdatuxuebbtjxikh.supabase.co"
   }
 }
