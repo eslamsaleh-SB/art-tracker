@@ -2585,13 +2585,13 @@ async function loadHours(R) {
   // UNION all 3 assignment tables so hours covers all tasks
   const { rows } = await query(`
     WITH all_asgn AS (
-      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM assignments
+      SELECT code, reviewer_name, team, match_id, assignment_date, task, app FROM assignments
       WHERE assignment_date BETWEEN ?1 AND ?2
       UNION
-      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM players
+      SELECT code, reviewer_name, team, match_id, assignment_date, task, app FROM players
       WHERE assignment_date BETWEEN ?1 AND ?2
       UNION
-      SELECT code, reviewer_name, team, match_id, assignment_date, task FROM bc_review
+      SELECT code, reviewer_name, team, match_id, assignment_date, task, app FROM bc_review
       WHERE assignment_date BETWEEN ?1 AND ?2
     )
     SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
