@@ -2823,16 +2823,16 @@ async function loadMatchesPage() {
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
     query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time
            WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> ''
-           ORDER BY priority_sb_home`),
+           ORDER BY v`),
     query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time
            WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> ''
-           ORDER BY priority_sb_away`),
+           ORDER BY v`),
     query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time
            WHERE game_sla IS NOT NULL AND game_sla <> ''
-           ORDER BY game_sla`),
+           ORDER BY v`),
     query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time
            WHERE matchid IS NOT NULL AND matchid <> ''
-           ORDER BY matchid`),
+           ORDER BY v`),
   ]);
   const homeOpts   = homeRes.rows.map(r => r.v);
   const awayOpts   = awayRes.rows.map(r => r.v);
@@ -3215,10 +3215,10 @@ async function loadMatchesDaily() {
   if (!panel) return;
 
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
-    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
-    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
-    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY game_sla`),
-    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY v`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY v`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY v`),
+    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY v`),
   ]);
   const homeOpts = homeRes.rows.map(r => r.v);
   const awayOpts = awayRes.rows.map(r => r.v);
@@ -3260,10 +3260,10 @@ async function loadMatchesWeekly() {
   const panel = document.getElementById('panel-matches-weekly');
   if (!panel) return;
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
-    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
-    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
-    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY game_sla`),
-    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY v`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY v`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY v`),
+    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY v`),
   ]);
   const rows = await loadMatchesData();
   const result = buildMatchesGrouped(rows, getWeekLabel, 'Week');
@@ -3282,10 +3282,10 @@ async function loadMatchesMonthly() {
   const panel = document.getElementById('panel-matches-monthly');
   if (!panel) return;
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
-    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
-    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
-    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY game_sla`),
-    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY v`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY v`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY v`),
+    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY v`),
   ]);
   const rows = await loadMatchesData();
   const result = buildMatchesGrouped(rows, getMonthLabel, 'Month');
@@ -3308,10 +3308,10 @@ async function loadDeliverTimeDetails() {
   if (!panel) return;
 
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
-    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
-    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
-    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY CAST(game_sla AS NUMERIC)`),
-    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
+    query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY v`),
+    query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY v`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY CAST(v AS NUMERIC)`),
+    query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY v`),
   ]);
 
   const rows = await loadMatchesData();
