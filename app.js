@@ -376,11 +376,11 @@ function ruleActualExpr(aliasA, aliasDL) {
   const DL = aliasDL ? aliasDL + '.' : '';
   return `
     CASE
-      WHEN lower(IFNULL(${A}half, '')) = '1st' THEN
+      WHEN lower(COALESCE(${A}half, '')) = '1st' THEN
         CASE WHEN ${DL}partid = '1' THEN ${DL}actual_time_taken ELSE 0 END
-      WHEN lower(IFNULL(${A}half, '')) = '2nd' THEN
+      WHEN lower(COALESCE(${A}half, '')) = '2nd' THEN
         CASE WHEN ${DL}partid = '2' THEN ${DL}actual_time_taken ELSE 0 END
-      WHEN lower(IFNULL(${A}side, '')) IN ('home', 'away') THEN
+      WHEN lower(COALESCE(${A}side, '')) IN ('home', 'away') THEN
         ${DL}actual_time_taken
       ELSE
         CASE WHEN ${DL}partid IN ('1', '2') THEN ${DL}actual_time_taken ELSE 0 END
@@ -705,7 +705,7 @@ function extraFilterSQL(prefix) {
   const args  = [];
   let n = 4;
   // Hard-coded: never show umbrella app rows or pre-Jan-3 rows.
-  parts.push(`IFNULL(lower(${prefix}app), '') <> 'umbrella'`);
+  parts.push(`COALESCE(lower(${prefix}app), '') <> 'umbrella'`);
   parts.push(`${prefix}assignment_date >= '2026-01-03'`);
   // Multi-select include teams
   if (STATE.teams && STATE.teams.length) {
