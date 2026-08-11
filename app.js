@@ -2686,9 +2686,9 @@ async function loadMatchesData() {
     if (!isNaN(threshold)) {
       if (STATE.matchesOutlierOp === 'above') {
         // Exclude outliers above threshold
-        conditions.push(`(CAST(delivery_time AS REAL) <= ?${paramIdx} OR delivery_time IS NULL)`);
+        conditions.push(`(CAST(delivery_time AS NUMERIC) <= ?${paramIdx} OR delivery_time IS NULL)`);
       } else {
-        conditions.push(`(CAST(delivery_time AS REAL) >= ?${paramIdx} OR delivery_time IS NULL)`);
+        conditions.push(`(CAST(delivery_time AS NUMERIC) >= ?${paramIdx} OR delivery_time IS NULL)`);
       }
       params[paramIdx++] = threshold;
     }
@@ -3310,7 +3310,7 @@ async function loadDeliverTimeDetails() {
   const [homeRes, awayRes, slaRes, matchIdRes] = await Promise.all([
     query(`SELECT DISTINCT priority_sb_home AS v FROM quality_delivery_time WHERE priority_sb_home IS NOT NULL AND priority_sb_home <> '' ORDER BY priority_sb_home`),
     query(`SELECT DISTINCT priority_sb_away AS v FROM quality_delivery_time WHERE priority_sb_away IS NOT NULL AND priority_sb_away <> '' ORDER BY priority_sb_away`),
-    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY CAST(game_sla AS REAL)`),
+    query(`SELECT DISTINCT game_sla AS v FROM quality_delivery_time WHERE game_sla IS NOT NULL AND game_sla <> '' ORDER BY CAST(game_sla AS NUMERIC)`),
     query(`SELECT DISTINCT matchid AS v FROM quality_delivery_time WHERE matchid IS NOT NULL AND matchid <> '' ORDER BY matchid`),
   ]);
 
