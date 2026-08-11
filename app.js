@@ -2445,7 +2445,8 @@ async function loadPartial(R) {
       AND lower(a.half) = 'both'
       ${ef.sql}
     GROUP BY a.match_id, a.code, a.task, a.half, a.side
-    HAVING (logs_1st > 0 AND logs_2nd = 0) OR (logs_1st = 0 AND logs_2nd > 0)
+    HAVING (SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) > 0 AND SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) = 0)
+        OR (SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) = 0 AND SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) > 0)
     ORDER BY a.assignment_date DESC
     LIMIT 2000
   `, [start, end, like, ...ef.args]);
