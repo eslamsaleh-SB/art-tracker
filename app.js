@@ -353,10 +353,10 @@ function granExpr(col, gran) {
   if (gran === 'week')    {
     // Return the Sunday date of that week — e.g. '2026-07-19'.
     // This gives a real date on the axis instead of "2026-W29".
-    return `date(${col}, 'weekday 0', '-7 days')`;
+    return `TO_CHAR((DATE_TRUNC('week', TO_DATE(SUBSTR(${col},1,10),'YYYY-MM-DD') + INTERVAL '1 day') - INTERVAL '1 day')::date, 'YYYY-MM-DD')`;
   }
   if (gran === 'month')   return `substr(${col},1,7)`;
-  if (gran === 'quarter') return `substr(${col},1,4) || '-Q' || ((cast(substr(${col},6,2) AS INTEGER) - 1)/3 + 1)`;
+  if (gran === 'quarter') return `substr(${col},1,4) || '-Q' || CAST(((CAST(substr(${col},6,2) AS INTEGER) - 1)/3 + 1) AS TEXT)`;
   if (gran === 'year')    return `substr(${col},1,4)`;
   return `substr(${col},1,7)`;
 }
@@ -2579,7 +2579,7 @@ async function loadHours(R) {
 
   const bucketExpr = STATE.hoursGran === 'day'
     ? `substr(dl.review_started, 1, 10)`
-    : `date(dl.review_started, 'weekday 0', '-7 days')`;   // Sunday start
+    : `TO_CHAR((DATE_TRUNC('week', TO_DATE(SUBSTR(dl.review_started,1,10),'YYYY-MM-DD') + INTERVAL '1 day') - INTERVAL '1 day')::date, 'YYYY-MM-DD')`;   // Sunday start
 
   // UNION all 3 assignment tables so hours covers all tasks
   const { rows } = await query(`
