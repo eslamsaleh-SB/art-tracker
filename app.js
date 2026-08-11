@@ -377,13 +377,13 @@ function ruleActualExpr(aliasA, aliasDL) {
   return `
     CASE
       WHEN lower(COALESCE(${A}half, '')) = '1st' THEN
-        CASE WHEN ${DL}partid = '1' THEN ${DL}actual_time_taken ELSE 0 END
+        CASE WHEN ${DL}partid = '1' THEN CAST(${DL}actual_time_taken AS NUMERIC) ELSE 0 END
       WHEN lower(COALESCE(${A}half, '')) = '2nd' THEN
-        CASE WHEN ${DL}partid = '2' THEN ${DL}actual_time_taken ELSE 0 END
+        CASE WHEN ${DL}partid = '2' THEN CAST(${DL}actual_time_taken AS NUMERIC) ELSE 0 END
       WHEN lower(COALESCE(${A}side, '')) IN ('home', 'away') THEN
-        ${DL}actual_time_taken
+        CAST(${DL}actual_time_taken AS NUMERIC)
       ELSE
-        CASE WHEN ${DL}partid IN ('1', '2') THEN ${DL}actual_time_taken ELSE 0 END
+        CASE WHEN ${DL}partid IN ('1', '2') THEN CAST(${DL}actual_time_taken AS NUMERIC) ELSE 0 END
     END
   `;
 }
