@@ -1330,7 +1330,7 @@ async function loadReviewers(R) {
                  AND reviewer_name IS NOT NULL AND reviewer_name <> ''
                  GROUP BY reviewer_name ORDER BY COUNT(*) DESC LIMIT 1),
                MAX(reviewer_name)) AS reviewer_name,
-      (SELECT GROUP_CONCAT(DISTINCT team) FROM assignments WHERE code = a.code
+      (SELECT STRING_AGG(DISTINCT team, ',') FROM assignments WHERE code = a.code
          AND team IS NOT NULL AND team <> '') AS team,
       COUNT(*) AS matches_listed,
       COUNT(DISTINCT match_id) AS distinct_matches
@@ -1422,7 +1422,7 @@ async function loadRows(R) {
 
   // Sub-query: other tasks reviewer worked on same date (Players / B-C).
   const otherTasksExpr = `(
-    SELECT GROUP_CONCAT(DISTINCT t) FROM (
+    SELECT STRING_AGG(DISTINCT t, ',') FROM (
       SELECT 'Players' AS t FROM players
         WHERE code = assignments.code
           AND substr(assignment_date, 1, 10) = substr(assignments.assignment_date, 1, 10)
