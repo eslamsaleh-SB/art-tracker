@@ -824,7 +824,7 @@ async function loadOverview(R) {
           ${overlapClause('a')}
         GROUP BY a.task, a.match_id, a.code, a.half, a.side
       )
-      GROUP BY task HAVING samples >= 5
+      GROUP BY task HAVING COUNT(*) >= 5
     )
     ORDER BY avg_actual ASC
   `, [start, end, like, ...efA.args])).rows;
