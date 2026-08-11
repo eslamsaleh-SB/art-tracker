@@ -5,6 +5,7 @@
 
 export default {
   async fetch(request, env) {
+    try {
     const url = new URL(request.url);
 
     // ── Supabase helpers ──────────────────────────────────────────────────────
@@ -137,6 +138,9 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+    } catch(e) {
+      return Response.json({ crashed: true, error: e.message, stack: e.stack }, { status: 500 });
+    }
   },
 };
 
