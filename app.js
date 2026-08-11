@@ -793,7 +793,7 @@ async function loadOverview(R) {
     SELECT AVG(match_total) AS avg_actual, COUNT(*) AS matches
     FROM (
       SELECT dl.matchid AS match_id, dl.code AS code,
-             SUM(dl.actual_time_taken) AS match_total
+             SUM(CAST(dl.actual_time_taken AS NUMERIC)) AS match_total
       FROM data_logs dl
       WHERE EXISTS (
         SELECT 1 FROM assignments a
@@ -961,7 +961,7 @@ async function loadTasks(R) {
       FROM unit_logs
     ),
     unit_actual AS (
-      SELECT task, match_id, code, half, side, SUM(actual_time_taken) AS unit_total
+      SELECT task, match_id, code, half, side, SUM(CAST(actual_time_taken AS NUMERIC)) AS unit_total
       FROM anchored
       WHERE julianday(review_started) - julianday(anchor) <= 1.0
       GROUP BY task, match_id, code, half, side
@@ -987,7 +987,7 @@ async function loadTasks(R) {
       SELECT *, MIN(review_started) OVER (PARTITION BY task, match_id, code) AS anchor
       FROM unit_logs
     )
-    SELECT task, match_id, code, SUM(actual_time_taken) AS actual
+    SELECT task, match_id, code, SUM(CAST(actual_time_taken AS NUMERIC)) AS actual
     FROM anchored
     WHERE julianday(review_started) - julianday(anchor) <= 1.0
     GROUP BY task, match_id, code
@@ -1011,7 +1011,7 @@ async function loadTasks(R) {
       FROM unit_logs
     ),
     unit_actual AS (
-      SELECT task, match_id, code, half, SUM(actual_time_taken) AS unit_total
+      SELECT task, match_id, code, half, SUM(CAST(actual_time_taken AS NUMERIC)) AS unit_total
       FROM anchored
       WHERE julianday(review_started) - julianday(anchor) <= 1.0
       GROUP BY task, match_id, code, half
@@ -1180,7 +1180,7 @@ async function loadTasks(R) {
       FROM unit_logs
     ),
     unit_actual AS (
-      SELECT task, bucket, match_id, code, half, side, SUM(actual_time_taken) AS unit_total
+      SELECT task, bucket, match_id, code, half, side, SUM(CAST(actual_time_taken AS NUMERIC)) AS unit_total
       FROM anchored
       WHERE julianday(review_started) - julianday(anchor) <= 1.0
       GROUP BY task, bucket, match_id, code, half, side
@@ -1206,7 +1206,7 @@ async function loadTasks(R) {
       SELECT *, MIN(review_started) OVER (PARTITION BY task, bucket, match_id, code) AS anchor
       FROM unit_logs
     )
-    SELECT task, bucket, match_id, code, SUM(actual_time_taken) AS actual
+    SELECT task, bucket, match_id, code, SUM(CAST(actual_time_taken AS NUMERIC)) AS actual
     FROM anchored
     WHERE julianday(review_started) - julianday(anchor) <= 1.0
     GROUP BY task, bucket, match_id, code
@@ -1230,7 +1230,7 @@ async function loadTasks(R) {
       FROM unit_logs
     ),
     unit_actual AS (
-      SELECT task, bucket, match_id, code, half, SUM(actual_time_taken) AS unit_total
+      SELECT task, bucket, match_id, code, half, SUM(CAST(actual_time_taken AS NUMERIC)) AS unit_total
       FROM anchored
       WHERE julianday(review_started) - julianday(anchor) <= 1.0
       GROUP BY task, bucket, match_id, code, half
@@ -1919,7 +1919,7 @@ async function loadExtraTable(R, opt) {
           WHEN (SELECT COUNT(*) FROM ${table} pp
                 WHERE pp.match_id = ${a}.match_id AND pp.code = ${a}.code) >= 2
           THEN COALESCE((
-            SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+            SELECT SUM(CAST(dl.actual_time_taken AS NUMERIC)) FROM data_logs dl
             WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
               AND julianday(dl.review_started) - julianday((
                 SELECT MIN(dl2.review_started) FROM data_logs dl2
@@ -1927,7 +1927,7 @@ async function loadExtraTable(R, opt) {
               )) <= 1.0
           ), 0) / 2.0
           ELSE COALESCE((
-            SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+            SELECT SUM(CAST(dl.actual_time_taken AS NUMERIC)) FROM data_logs dl
             WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
               AND julianday(dl.review_started) - julianday((
                 SELECT MIN(dl2.review_started) FROM data_logs dl2
@@ -1940,7 +1940,7 @@ async function loadExtraTable(R, opt) {
     // BC: unit = (match, code, half). Partid filtered by half. Anchor per half.
     return `(
       COALESCE((
-        SELECT SUM(dl.actual_time_taken) FROM data_logs dl
+        SELECT SUM(CAST(dl.actual_time_taken AS NUMERIC)) FROM data_logs dl
         WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
           AND dl.partid = CASE
                 WHEN lower(${a}.half) = '1st' THEN '1'
@@ -2595,9 +2595,9 @@ async function loadHours(R) {
     )
     SELECT a.code AS code, a.reviewer_name AS reviewer_name, a.team AS team,
            ${bucketExpr} AS bucket,
-           SUM(dl.actual_time_taken)  AS actual,
-           SUM(dl.total_break_time)   AS break_time,
-           SUM(dl.total_time_taken)   AS total,
+           SUM(CAST(dl.actual_time_taken AS NUMERIC))  AS actual,
+           SUM(CAST(dl.total_break_time AS NUMERIC))   AS break_time,
+           SUM(CAST(dl.total_time_taken AS NUMERIC))   AS total,
            COUNT(DISTINCT a.match_id) AS matches
     FROM all_asgn a
     JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
