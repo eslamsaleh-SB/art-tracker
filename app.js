@@ -3633,11 +3633,8 @@ async function runImport() {
   impLog(`Header cols detected: ${header.length}. Mapped ${found.length}/${cfg.dbCols.length} DB cols. Missing: ${missing.join(', ') || '(none)'}`);
   impLog('Rows to push: ' + rows.length);
 
-  // Build INSERT OR REPLACE statements
+  // Build multi-row INSERT per batch (1 Supabase RPC call per batch, not N).
   const colList = cfg.dbCols.join(',');
-  const qMarks  = cfg.dbCols.map(() => '?').join(',');
-  // INSERT OR IGNORE: same PK → skip. Prevents overwrites on repeat uploads.
-  const sql = `INSERT OR IGNORE INTO ${tableName} (${colList}) VALUES (${qMarks})`;
 
   // Pre-filter: drop rows where any requiredCol is empty.
   const requiredCols = cfg.requiredCols || [];
@@ -3656,7 +3653,7 @@ async function runImport() {
     if (skippedRequired) impLog(`Skipped ${skippedRequired} rows w/ missing required cols: ${requiredCols.join(', ')}`);
   }
 
-  const BATCH = 100;
+  const BATCH = 500;
   let pushed = 0, failed = 0;
   const t0 = performance.now();
   const importTs = new Date().toISOString();
@@ -3665,35 +3662,33 @@ async function runImport() {
     const constants  = cfg.constants || {};
     const transforms = cfg.valueTransforms || {};
     const computed   = cfg.computedCols || {};
-    const statements = slice.map(row => {
+
+    // Build one multi-row INSERT for the whole slice.
+    const allArgs = [];
+    slice.forEach(row => {
       const rowByCol = (colName) => {
         const jj = mapping[colName];
         return (jj != null && jj < row.length) ? row[jj] : '';
       };
-      return {
-        sql,
-        args: cfg.dbCols.map(c => {
-          const j = mapping[c];
-          let v = (j != null && j < row.length) ? row[j] : '';
-          // Value transform (e.g. part id → 1st/2nd)
-          if (transforms[c]) v = transforms[c](v);
-          // Constant fill when CSV has no value for that col
-          if ((v === '' || v == null) && constants[c] != null) v = constants[c];
-          // Computed col (e.g. review_date derived from review_started)
-          if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
-          // Normalize known date columns to ISO — fixes M/D/YYYY → YYYY-MM-DD.
-          if (isDateColName(c)) v = normalizeDate(v);
-          // Auto-fill last_modified when CSV doesn't provide it.
-          if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
-          return v;
-        }),
-      };
+      cfg.dbCols.forEach(c => {
+        const j = mapping[c];
+        let v = (j != null && j < row.length) ? row[j] : '';
+        if (transforms[c]) v = transforms[c](v);
+        if ((v === '' || v == null) && constants[c] != null) v = constants[c];
+        if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
+        if (isDateColName(c)) v = normalizeDate(v);
+        if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
+        allArgs.push(v);
+      });
     });
+    const rowPlaceholders = slice.map(() => `(${cfg.dbCols.map(() => '?').join(',')})`).join(',');
+    const sql = `INSERT OR IGNORE INTO ${tableName} (${colList}) VALUES ${rowPlaceholders}`;
+
     try {
       const r = await fetch('/api/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
-        body: JSON.stringify({ statements }),
+        body: JSON.stringify({ statements: [{ sql, args: allArgs }] }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + JSON.stringify(j.error || j).slice(0,200));
