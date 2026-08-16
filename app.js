@@ -3446,20 +3446,24 @@ const IMPORT_CONFIG = {
     dbCols: ['match_id','app','code','task','half','side','reviewer_name','team','competition',
              'home_team','away_team','home_priority','away_priority','comp_priority',
              'match_date','sla','assignment_date','last_modified'],
+    pkCols: ['match_id','code','task','half','side'],
     aliases: {},
   },
   data_logs: {
     dbCols: ['matchid','hr_code','partid','full_name','review_started','review_ended',
              'actual_time_taken','total_break_time','total_time_taken'],
+    pkCols: ['matchid','hr_code','partid','review_started','review_ended'],
     aliases: { hr_code: 'code' },
   },
   productivity_config: {
     dbCols: ['task','expected_minutes'],
+    pkCols: ['task'],
     aliases: {},
   },
   players: {
     dbCols: ['match_id','code','task','half','side','reviewer_name','team',
              'competition','home_team','away_team','assignment_date','app'],
+    pkCols: ['match_id','side'],
     aliases: {
       side: 'Side',
       assignment_date: 'review_date',
@@ -3470,6 +3474,7 @@ const IMPORT_CONFIG = {
   bc_review: {
     dbCols: ['match_id','code','task','half','side','reviewer_name','team',
              'competition','home_team','away_team','assignment_date','app'],
+    pkCols: ['match_id','half'],
     aliases: {
       match_id: 'Match ID',
       code: 'Reviewer Code',
@@ -3500,6 +3505,7 @@ const IMPORT_CONFIG = {
       'sla_breached','breach_hours','match_review_time_taken_hours',
       'delivery_time','last_modified',
     ],
+    pkCols: ['matchid'],
     aliases: {},
     positional: true,       // fall back to column-index if header names don't match
     requiredCols: ['matchid'],
@@ -3657,31 +3663,46 @@ async function runImport() {
   let pushed = 0, failed = 0;
   const t0 = performance.now();
   const importTs = new Date().toISOString();
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const slice = rows.slice(i, i + BATCH);
-    const constants  = cfg.constants || {};
-    const transforms = cfg.valueTransforms || {};
-    const computed   = cfg.computedCols || {};
+  const constants  = cfg.constants || {};
+  const transforms = cfg.valueTransforms || {};
+  const computed   = cfg.computedCols || {};
 
-    // Build row objects for PostgREST bulk upsert.
-    const rowObjs = slice.map(row => {
-      const rowByCol = (colName) => {
-        const jj = mapping[colName];
-        return (jj != null && jj < row.length) ? row[jj] : '';
-      };
-      const obj = {};
-      cfg.dbCols.forEach(c => {
-        const j = mapping[c];
-        let v = (j != null && j < row.length) ? row[j] : '';
-        if (transforms[c]) v = transforms[c](v);
-        if ((v === '' || v == null) && constants[c] != null) v = constants[c];
-        if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
-        if (isDateColName(c)) v = normalizeDate(v);
-        if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
-        obj[c] = v;
-      });
-      return obj;
+  // Build all row objects up front so we can deduplicate across the whole file.
+  let allRowObjs = rows.map(row => {
+    const rowByCol = (colName) => {
+      const jj = mapping[colName];
+      return (jj != null && jj < row.length) ? row[jj] : '';
+    };
+    const obj = {};
+    cfg.dbCols.forEach(c => {
+      const j = mapping[c];
+      let v = (j != null && j < row.length) ? row[j] : '';
+      if (transforms[c]) v = transforms[c](v);
+      if ((v === '' || v == null) && constants[c] != null) v = constants[c];
+      if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
+      if (isDateColName(c)) v = normalizeDate(v);
+      if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
+      obj[c] = v;
     });
+    return obj;
+  });
+
+  // Deduplicate by PK (last occurrence wins — same as upsert behaviour).
+  const pkCols = cfg.pkCols || [];
+  if (pkCols.length) {
+    const seen = new Map();
+    for (const obj of allRowObjs) {
+      const key = pkCols.map(c => obj[c] ?? '').join('\x00');
+      seen.set(key, obj);
+    }
+    const before = allRowObjs.length;
+    allRowObjs = [...seen.values()];
+    const deduped = before - allRowObjs.length;
+    if (deduped > 0) impLog(`Removed ${deduped} duplicate rows (same PK) from file.`);
+  }
+
+  for (let i = 0; i < allRowObjs.length; i += BATCH) {
+    const rowObjs = allRowObjs.slice(i, i + BATCH);
 
     try {
       const r = await fetch('/api/import', {
@@ -3693,12 +3714,12 @@ async function runImport() {
       let j = {};
       try { j = JSON.parse(text); } catch (_) {}
       if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? String(j.error).slice(0,300) : text.slice(0,300)));
-      pushed += slice.length;
+      pushed += rowObjs.length;
     } catch (e) {
-      failed += slice.length;
+      failed += rowObjs.length;
       impLog('Batch ' + (i / BATCH + 1) + ' FAILED: ' + e.message, 'err');
     }
-    impLog(`Progress: ${pushed}/${rows.length} pushed (${failed} failed)`);
+    impLog(`Progress: ${pushed}/${allRowObjs.length} pushed (${failed} failed)`);
   }
   const secs = ((performance.now() - t0) / 1000).toFixed(1);
   impLog(`Done. Pushed ${pushed} rows in ${secs}s. Failed ${failed}.`, failed ? 'err' : 'ok');
