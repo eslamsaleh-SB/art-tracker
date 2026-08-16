@@ -792,18 +792,18 @@ async function loadOverview(R) {
   const overall = (await query(`
     SELECT AVG(match_total) AS avg_actual, COUNT(*) AS matches
     FROM (
-      SELECT dl.matchid AS match_id, dl.code AS code,
+      SELECT dl.matchid AS match_id, dl.hr_code AS code,
              SUM(CAST(REPLACE(dl.actual_time_taken, ',', '') AS NUMERIC)) AS match_total
       FROM data_logs dl
       WHERE EXISTS (
         SELECT 1 FROM assignments a
-        WHERE a.match_id = dl.matchid AND a.code = dl.code
+        WHERE a.match_id = dl.matchid AND a.code = dl.hr_code
           AND a.assignment_date BETWEEN ?1 AND ?2
           AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
           ${efA.sql}
           ${overlapClause('a')}
       )
-      GROUP BY dl.matchid, dl.code
+      GROUP BY dl.matchid, dl.hr_code
     )
   `, [start, end, like, ...efA.args])).rows[0] || {};
 
@@ -816,7 +816,7 @@ async function loadOverview(R) {
         SELECT a.task AS task, a.match_id AS match_id, a.code AS code,
                SUM(${ruleActualExpr('a','dl')}) AS match_total
         FROM assignments a
-        JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+        JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
         WHERE a.assignment_date BETWEEN ?1 AND ?2
           AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3 OR a.team LIKE ?3)
           AND a.task IS NOT NULL AND a.task <> ''
@@ -943,7 +943,7 @@ async function loadTasks(R) {
              a.half AS half, a.side AS side,
              dl.review_started, dl.actual_time_taken
       FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
         AND (
           (lower(a.half) = '1st' AND dl.partid = '1') OR
           (lower(a.half) = '2nd' AND dl.partid = '2') OR
@@ -980,7 +980,7 @@ async function loadTasks(R) {
       SELECT p.task, p.match_id, p.code,
              dl.review_started, dl.actual_time_taken
       FROM players_scope p
-      JOIN data_logs dl ON dl.matchid = p.match_id AND dl.code = p.code
+      JOIN data_logs dl ON dl.matchid = p.match_id AND dl.hr_code = p.code
       WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')} ${overlapClause('p')}
     ),
     anchored AS (
@@ -1002,7 +1002,7 @@ async function loadTasks(R) {
       SELECT b.task, b.match_id, b.code, b.half,
              dl.review_started, dl.actual_time_taken
       FROM bc_scope b
-      JOIN data_logs dl ON dl.matchid = b.match_id AND dl.code = b.code
+      JOIN data_logs dl ON dl.matchid = b.match_id AND dl.hr_code = b.code
         AND dl.partid = CASE WHEN b.half = '1st' THEN '1' WHEN b.half = '2nd' THEN '2' ELSE '0' END
       WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')} ${overlapClause('b')}
     ),
@@ -1162,7 +1162,7 @@ async function loadTasks(R) {
              a.match_id AS match_id, a.code AS code, a.half, a.side,
              dl.review_started, dl.actual_time_taken
       FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
         AND (
           (lower(a.half) = '1st' AND dl.partid = '1') OR
           (lower(a.half) = '2nd' AND dl.partid = '2') OR
@@ -1199,7 +1199,7 @@ async function loadTasks(R) {
       SELECT p.task, ${gexprP} AS bucket, p.match_id, p.code,
              dl.review_started, dl.actual_time_taken
       FROM players_scope p
-      JOIN data_logs dl ON dl.matchid = p.match_id AND dl.code = p.code
+      JOIN data_logs dl ON dl.matchid = p.match_id AND dl.hr_code = p.code
       WHERE 1=1 ${exclPlayers.replace(/\bp\./g, 'p.')} ${overlapClause('p')}
     ),
     anchored AS (
@@ -1221,7 +1221,7 @@ async function loadTasks(R) {
       SELECT b.task, ${gexprB} AS bucket, b.match_id, b.code, b.half,
              dl.review_started, dl.actual_time_taken
       FROM bc_scope b
-      JOIN data_logs dl ON dl.matchid = b.match_id AND dl.code = b.code
+      JOIN data_logs dl ON dl.matchid = b.match_id AND dl.hr_code = b.code
         AND dl.partid = CASE WHEN b.half = '1st' THEN '1' WHEN b.half = '2nd' THEN '2' ELSE '0' END
       WHERE 1=1 ${exclBc.replace(/\bb\./g, 'b.')} ${overlapClause('b')}
     ),
@@ -1354,7 +1354,7 @@ async function loadReviewers(R) {
       SELECT a.code AS code, a.match_id AS match_id,
              SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM assignments a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.team LIKE ?3 OR a.code LIKE ?3)
         ${efA.sql}
@@ -1444,7 +1444,7 @@ async function loadRows(R) {
       )
       AND EXISTS (
         SELECT 1 FROM data_logs dl
-        WHERE dl.matchid = assignments.match_id AND dl.code = assignments.code
+        WHERE dl.matchid = assignments.match_id AND dl.hr_code = assignments.code
       )
       ${ef.sql}
       ${overlapClause('assignments')}
@@ -1920,18 +1920,18 @@ async function loadExtraTable(R, opt) {
                 WHERE pp.match_id = ${a}.match_id AND pp.code = ${a}.code) >= 2
           THEN COALESCE((
             SELECT SUM(CAST(REPLACE(dl.actual_time_taken, ',', '') AS NUMERIC)) FROM data_logs dl
-            WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+            WHERE dl.matchid = ${a}.match_id AND dl.hr_code = ${a}.code
               AND julianday(dl.review_started) - julianday((
                 SELECT MIN(dl2.review_started) FROM data_logs dl2
-                WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+                WHERE dl2.matchid = ${a}.match_id AND dl2.hr_code = ${a}.code
               )) <= 1.0
           ), 0) / 2.0
           ELSE COALESCE((
             SELECT SUM(CAST(REPLACE(dl.actual_time_taken, ',', '') AS NUMERIC)) FROM data_logs dl
-            WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+            WHERE dl.matchid = ${a}.match_id AND dl.hr_code = ${a}.code
               AND julianday(dl.review_started) - julianday((
                 SELECT MIN(dl2.review_started) FROM data_logs dl2
-                WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+                WHERE dl2.matchid = ${a}.match_id AND dl2.hr_code = ${a}.code
               )) <= 1.0
           ), 0)
         END
@@ -1941,14 +1941,14 @@ async function loadExtraTable(R, opt) {
     return `(
       COALESCE((
         SELECT SUM(CAST(REPLACE(dl.actual_time_taken, ',', '') AS NUMERIC)) FROM data_logs dl
-        WHERE dl.matchid = ${a}.match_id AND dl.code = ${a}.code
+        WHERE dl.matchid = ${a}.match_id AND dl.hr_code = ${a}.code
           AND dl.partid = CASE
                 WHEN lower(${a}.half) = '1st' THEN '1'
                 WHEN lower(${a}.half) = '2nd' THEN '2'
                 ELSE '0' END
           AND julianday(dl.review_started) - julianday((
             SELECT MIN(dl2.review_started) FROM data_logs dl2
-            WHERE dl2.matchid = ${a}.match_id AND dl2.code = ${a}.code
+            WHERE dl2.matchid = ${a}.match_id AND dl2.hr_code = ${a}.code
               AND dl2.partid = CASE
                     WHEN lower(${a}.half) = '1st' THEN '1'
                     WHEN lower(${a}.half) = '2nd' THEN '2'
@@ -2079,7 +2079,7 @@ async function loadExtraTable(R, opt) {
              (
                SELECT (julianday(MIN(dl.review_started)) - julianday(p.assignment_date)) * 24.0
                FROM data_logs dl
-               WHERE dl.matchid = p.match_id AND dl.code = p.code
+               WHERE dl.matchid = p.match_id AND dl.hr_code = p.code
                  ${kind === 'bc'
                    ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
                    : ""}
@@ -2113,7 +2113,7 @@ async function loadExtraTable(R, opt) {
         -- BC also enforces partid match (1st ↔ partid 1, 2nd ↔ partid 2).
         AND EXISTS (
           SELECT 1 FROM data_logs dl
-          WHERE dl.matchid = p.match_id AND dl.code = p.code
+          WHERE dl.matchid = p.match_id AND dl.hr_code = p.code
             ${kind === 'bc'
               ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
               : ""}
@@ -2220,7 +2220,7 @@ async function loadExtraNoLogs(R, opt) {
         )
         AND NOT EXISTS (
           SELECT 1 FROM data_logs dl
-          WHERE dl.matchid = p.match_id AND dl.code = p.code
+          WHERE dl.matchid = p.match_id AND dl.hr_code = p.code
             -- BC rows are half-specific → require partid match. Players ignore half.
             ${opt.table === 'bc_review'
               ? "AND dl.partid = CASE WHEN p.half = '1st' THEN '1' WHEN p.half = '2nd' THEN '2' ELSE '0' END"
@@ -2281,7 +2281,7 @@ async function loadExtra(R) {
       SELECT a.task AS task, a.match_id, a.code, a.half, a.side,
              SUM(${ruleActualExpr('a','dl')}) AS match_total
       FROM extra_tasks a
-      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+      JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
       WHERE a.assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
         ${taskFilter}
@@ -2318,7 +2318,7 @@ async function loadExtra(R) {
               SELECT a2.match_id, a2.code, a2.half, a2.side,
                      SUM(${ruleActualExpr('a2','dl2')}) AS match_total
               FROM extra_tasks a2
-              JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.code = a2.code
+              JOIN data_logs dl2 ON dl2.matchid = a2.match_id AND dl2.hr_code = a2.code
               WHERE a2.code = a.code AND a2.task = a.task
                 AND a2.assignment_date BETWEEN ?1 AND ?2
               GROUP BY a2.match_id, a2.code, a2.half, a2.side
@@ -2384,7 +2384,7 @@ async function loadNoLogs(R) {
     SELECT a.match_id, a.assignment_date, a.competition, a.home_team, a.away_team,
            a.task, a.half, a.side, a.code, a.reviewer_name, a.team
     FROM assignments a
-    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
     WHERE dl.matchid IS NULL
       AND a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
@@ -2439,7 +2439,7 @@ async function loadPartial(R) {
              ELSE 'ok'
            END AS missing
     FROM assignments a
-    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    LEFT JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
     WHERE a.assignment_date BETWEEN ?1 AND ?2
       AND (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       AND lower(a.half) = 'both'
@@ -2515,19 +2515,19 @@ async function loadPlayersPartial(R) {
                          AND team IS NOT NULL AND team <> ''
                          GROUP BY team ORDER BY COUNT(*) DESC LIMIT 1)) AS resolved_team,
              (SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
-                WHERE dl.matchid = p.match_id AND dl.code = p.code) AS logs_1st,
+                WHERE dl.matchid = p.match_id AND dl.hr_code = p.code) AS logs_1st,
              (SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
-                WHERE dl.matchid = p.match_id AND dl.code = p.code) AS logs_2nd,
+                WHERE dl.matchid = p.match_id AND dl.hr_code = p.code) AS logs_2nd,
              CASE
                WHEN (SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code) > 0
+                       WHERE dl.matchid = p.match_id AND dl.hr_code = p.code) > 0
                 AND COALESCE((SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) = 0
+                       WHERE dl.matchid = p.match_id AND dl.hr_code = p.code), 0) = 0
                THEN 'Missing 2nd'
                WHEN COALESCE((SELECT SUM(CASE WHEN dl.partid = '1' THEN 1 ELSE 0 END) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code), 0) = 0
+                       WHERE dl.matchid = p.match_id AND dl.hr_code = p.code), 0) = 0
                 AND (SELECT SUM(CASE WHEN dl.partid = '2' THEN 1 ELSE 0 END) FROM data_logs dl
-                       WHERE dl.matchid = p.match_id AND dl.code = p.code) > 0
+                       WHERE dl.matchid = p.match_id AND dl.hr_code = p.code) > 0
                THEN 'Missing 1st'
                ELSE 'ok'
              END AS missing
@@ -2601,7 +2601,7 @@ async function loadHours(R) {
            SUM(CAST(REPLACE(dl.total_time_taken, ',', '') AS NUMERIC))   AS total,
            COUNT(DISTINCT a.match_id) AS matches
     FROM all_asgn a
-    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.code = a.code
+    JOIN data_logs dl ON dl.matchid = a.match_id AND dl.hr_code = a.code
     WHERE (?3 = '' OR a.reviewer_name LIKE ?3 OR a.match_id LIKE ?3 OR a.task LIKE ?3 OR a.code LIKE ?3)
       ${ef.sql}
       ${overlapClause('a')}
@@ -3449,9 +3449,9 @@ const IMPORT_CONFIG = {
     aliases: {},
   },
   data_logs: {
-    dbCols: ['matchid','code','partid','full_name','review_started','review_ended',
+    dbCols: ['matchid','hr_code','partid','full_name','review_started','review_ended',
              'actual_time_taken','total_break_time','total_time_taken'],
-    aliases: { code: 'hr_code' },
+    aliases: { hr_code: 'code' },
   },
   productivity_config: {
     dbCols: ['task','expected_minutes'],
