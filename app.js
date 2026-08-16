@@ -3696,7 +3696,7 @@ async function runImport() {
         body: JSON.stringify({ statements }),
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? JSON.stringify(j.error).slice(0,200) : await r.text()));
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + JSON.stringify(j.error || j).slice(0,200));
       pushed += slice.length;
     } catch (e) {
       failed += slice.length;
