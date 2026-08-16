@@ -25,11 +25,32 @@ export default {
       return sql.replace(/\?(?!\d)/g, () => '?' + (++i));
     }
 
-    // SQLite → PostgreSQL syntax patch for import statements
+    // Table PKs for upsert
+    const TABLE_PKS = {
+      assignments:            ['match_id','code','task','half','side'],
+      players:                ['match_id','side'],
+      bc_review:              ['match_id','half'],
+      quality_delivery_time:  ['matchid'],
+      data_logs:              ['matchid','hr_code','partid','review_started','review_ended'],
+    };
+
+    // SQLite → PostgreSQL upsert patch
     function pgSql(sql) {
-      return sql
-        .replace(/INSERT\s+OR\s+IGNORE\s+INTO/gi, 'INSERT INTO')
-        .replace(/;\s*$/, '') + ' ON CONFLICT DO NOTHING';
+      const clean = sql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/gi, 'INSERT INTO').replace(/;\s*$/, '');
+      const m = clean.match(/INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)/i);
+      if (m) {
+        const table = m[1].toLowerCase();
+        const pks   = TABLE_PKS[table];
+        if (pks) {
+          const cols    = m[2].split(',').map(c => c.trim());
+          const nonPks  = cols.filter(c => !pks.includes(c));
+          if (nonPks.length) {
+            const sets = nonPks.map(c => `${c} = EXCLUDED.${c}`).join(', ');
+            return `${clean} ON CONFLICT (${pks.join(',')}) DO UPDATE SET ${sets}`;
+          }
+        }
+      }
+      return clean + ' ON CONFLICT DO NOTHING';
     }
 
     async function sbQuery(sql, args = []) {
