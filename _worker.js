@@ -73,7 +73,30 @@ export default {
       if (!env.ADMIN_TOKEN) return new Response('ADMIN_TOKEN not configured', { status: 500 });
       if (!token || token !== env.ADMIN_TOKEN) return new Response('unauthorized', { status: 401 });
 
-      const { statements } = await request.json();
+      const body = await request.json();
+
+      // NEW: bulk upsert via PostgREST — { table, rows: [...] }
+      if (body.table && Array.isArray(body.rows)) {
+        const { table, rows } = body;
+        const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${table}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type':  'application/json',
+            'apikey':        env.SUPABASE_SERVICE_KEY,
+            'Authorization': 'Bearer ' + env.SUPABASE_SERVICE_KEY,
+            'Prefer':        'resolution=merge-duplicates',
+          },
+          body: JSON.stringify(rows),
+        });
+        if (!r.ok) {
+          const err = await r.text();
+          return Response.json({ error: err }, { status: 500 });
+        }
+        return Response.json({ ok: true, pushed: rows.length });
+      }
+
+      // LEGACY: SQL statements — { statements: [{sql, args}] }
+      const { statements } = body;
       if (!Array.isArray(statements) || !statements.length)
         return Response.json({ error: 'no statements' }, { status: 400 });
 

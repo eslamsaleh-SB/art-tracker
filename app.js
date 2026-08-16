@@ -3653,7 +3653,7 @@ async function runImport() {
     if (skippedRequired) impLog(`Skipped ${skippedRequired} rows w/ missing required cols: ${requiredCols.join(', ')}`);
   }
 
-  const BATCH = 50;
+  const BATCH = 500;
   let pushed = 0, failed = 0;
   const t0 = performance.now();
   const importTs = new Date().toISOString();
@@ -3663,13 +3663,13 @@ async function runImport() {
     const transforms = cfg.valueTransforms || {};
     const computed   = cfg.computedCols || {};
 
-    // Build one multi-row INSERT for the whole slice.
-    const allArgs = [];
-    slice.forEach(row => {
+    // Build row objects for PostgREST bulk upsert.
+    const rowObjs = slice.map(row => {
       const rowByCol = (colName) => {
         const jj = mapping[colName];
         return (jj != null && jj < row.length) ? row[jj] : '';
       };
+      const obj = {};
       cfg.dbCols.forEach(c => {
         const j = mapping[c];
         let v = (j != null && j < row.length) ? row[j] : '';
@@ -3678,22 +3678,21 @@ async function runImport() {
         if ((v === '' || v == null) && computed[c]) v = computed[c](rowByCol);
         if (isDateColName(c)) v = normalizeDate(v);
         if (c === 'last_modified' && (v === '' || v == null)) v = importTs;
-        allArgs.push(v);
+        obj[c] = v;
       });
+      return obj;
     });
-    const rowPlaceholders = slice.map(() => `(${cfg.dbCols.map(() => '?').join(',')})`).join(',');
-    const sql = `INSERT OR IGNORE INTO ${tableName} (${colList}) VALUES ${rowPlaceholders}`;
 
     try {
       const r = await fetch('/api/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
-        body: JSON.stringify({ statements: [{ sql, args: allArgs }] }),
+        body: JSON.stringify({ table: tableName, rows: rowObjs }),
       });
       const text = await r.text();
       let j = {};
       try { j = JSON.parse(text); } catch (_) {}
-      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? JSON.stringify(j.error).slice(0,300) : text.slice(0,300)));
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? String(j.error).slice(0,300) : text.slice(0,300)));
       pushed += slice.length;
     } catch (e) {
       failed += slice.length;
