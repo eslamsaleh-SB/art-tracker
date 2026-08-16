@@ -3653,7 +3653,7 @@ async function runImport() {
     if (skippedRequired) impLog(`Skipped ${skippedRequired} rows w/ missing required cols: ${requiredCols.join(', ')}`);
   }
 
-  const BATCH = 500;
+  const BATCH = 50;
   let pushed = 0, failed = 0;
   const t0 = performance.now();
   const importTs = new Date().toISOString();
@@ -3690,8 +3690,10 @@ async function runImport() {
         headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
         body: JSON.stringify({ statements: [{ sql, args: allArgs }] }),
       });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + JSON.stringify(j.error || j).slice(0,200));
+      const text = await r.text();
+      let j = {};
+      try { j = JSON.parse(text); } catch (_) {}
+      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + (j.error ? JSON.stringify(j.error).slice(0,300) : text.slice(0,300)));
       pushed += slice.length;
     } catch (e) {
       failed += slice.length;
