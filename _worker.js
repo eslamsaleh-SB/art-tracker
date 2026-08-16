@@ -77,12 +77,11 @@ export default {
       if (!Array.isArray(statements) || !statements.length)
         return Response.json({ error: 'no statements' }, { status: 400 });
 
-      let errors = 0;
-      for (const s of statements) {
-        const res = await sbWrite(pgSql(s.sql), s.args || []);
-        if (res.error) errors++;
-      }
-      if (errors) return Response.json({ error: `${errors} of ${statements.length} statements failed` }, { status: 500 });
+      const results = await Promise.all(
+        statements.map(s => sbWrite(pgSql(s.sql), s.args || []))
+      );
+      const errors = results.filter(r => r.error).length;
+      if (errors) return Response.json({ error: `${errors} of ${statements.length} statements failed`, detail: results.find(r=>r.error)?.error }, { status: 500 });
       return Response.json({ ok: true, pushed: statements.length });
     }
 

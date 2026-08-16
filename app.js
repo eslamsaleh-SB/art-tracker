@@ -3656,7 +3656,7 @@ async function runImport() {
     if (skippedRequired) impLog(`Skipped ${skippedRequired} rows w/ missing required cols: ${requiredCols.join(', ')}`);
   }
 
-  const BATCH = 500;
+  const BATCH = 100;
   let pushed = 0, failed = 0;
   const t0 = performance.now();
   const importTs = new Date().toISOString();
