@@ -856,8 +856,9 @@ async function loadOverview(R) {
 async function loadTasks(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
-  const ef  = extraFilterSQL('', 3);   // 2 fixed args: start, end
-  const efA = extraFilterSQL('a.', 4); // 3 fixed args: start, end, like
+  const ef   = extraFilterSQL('',   3); // 2 fixed args: start, end (players/bc)
+  const ef4  = extraFilterSQL('',   4); // 3 fixed args: start, end, like (no alias)
+  const efA  = extraFilterSQL('a.', 4); // 3 fixed args: start, end, like (alias a)
 
   // Base summary — counts by task from assignments
   const mainSummary = (await query(`
@@ -867,7 +868,7 @@ async function loadTasks(R) {
       WHERE assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
         AND task IS NOT NULL AND task <> ''
-        ${efA.sql}
+        ${ef4.sql}
     ),
     counts AS (
       SELECT task, COUNT(*) AS assignments, COUNT(DISTINCT match_id) AS distinct_matches
@@ -881,7 +882,7 @@ async function loadTasks(R) {
     top_month AS (SELECT task, ym FROM ranked_months WHERE rn = 1)
     SELECT c.task, c.assignments, c.distinct_matches, t.ym AS top_month
     FROM counts c LEFT JOIN top_month t ON t.task = c.task
-  `, [start, end, like, ...efA.args])).rows;
+  `, [start, end, like, ...ef4.args])).rows;
 
   // Players count
   const playersCount = (await query(`
