@@ -700,10 +700,10 @@ function overlapClause(alias) {
   `;
 }
 
-function extraFilterSQL(prefix) {
+function extraFilterSQL(prefix, startN = 4) {
   const parts = [];
   const args  = [];
-  let n = 4;
+  let n = startN;
   // Hard-coded: never show umbrella app rows or pre-Jan-3 rows.
   parts.push(`COALESCE(lower(${prefix}app), '') <> 'umbrella'`);
   parts.push(`${prefix}assignment_date >= '2026-01-03'`);
@@ -856,8 +856,8 @@ async function loadOverview(R) {
 async function loadTasks(R) {
   const like = STATE.q ? '%' + STATE.q + '%' : '';
   const start = R.start, end = R.end;
-  const ef  = extraFilterSQL('');
-  const efA = extraFilterSQL('a.');
+  const ef  = extraFilterSQL('', 3);   // 2 fixed args: start, end
+  const efA = extraFilterSQL('a.', 4); // 3 fixed args: start, end, like
 
   // Base summary — counts by task from assignments
   const mainSummary = (await query(`
@@ -867,7 +867,7 @@ async function loadTasks(R) {
       WHERE assignment_date BETWEEN ?1 AND ?2
         AND (?3 = '' OR reviewer_name LIKE ?3 OR task LIKE ?3 OR code LIKE ?3)
         AND task IS NOT NULL AND task <> ''
-        ${ef.sql}
+        ${efA.sql}
     ),
     counts AS (
       SELECT task, COUNT(*) AS assignments, COUNT(DISTINCT match_id) AS distinct_matches
@@ -881,7 +881,7 @@ async function loadTasks(R) {
     top_month AS (SELECT task, ym FROM ranked_months WHERE rn = 1)
     SELECT c.task, c.assignments, c.distinct_matches, t.ym AS top_month
     FROM counts c LEFT JOIN top_month t ON t.task = c.task
-  `, [start, end, like, ...ef.args])).rows;
+  `, [start, end, like, ...efA.args])).rows;
 
   // Players count
   const playersCount = (await query(`
@@ -1081,7 +1081,34 @@ async function loadTasks(R) {
           { label: 'Median (min)',  data: withAvg.map(t => round1(t.median_actual)), backgroundColor: css('--pos')    || '#4caf50' },
         ],
       },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom' } },
+      },
+      plugins: [{
+        id: 'barLabels',
+        afterDatasetsDraw(chart) {
+          const ctx = chart.ctx;
+          chart.data.datasets.forEach((ds, di) => {
+            const meta = chart.getDatasetMeta(di);
+            if (meta.hidden) return;
+            meta.data.forEach((bar, j) => {
+              const val = ds.data[j];
+              if (val == null) return;
+              const barHeight = Math.abs(bar.base - bar.y);
+              if (barHeight < 14) return; // skip bars too short for label
+              ctx.save();
+              ctx.font = 'bold 10px sans-serif';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'bottom';
+              ctx.fillStyle = '#fff';
+              ctx.fillText(val, bar.x, bar.y - 2);
+              ctx.restore();
+            });
+          });
+        },
+      }],
     });
   }
 
